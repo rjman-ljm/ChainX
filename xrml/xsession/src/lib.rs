@@ -24,16 +24,15 @@ mod mock;
 mod tests;
 
 // Substrate
-use primitives::traits::{As, Convert, One, Zero};
+use primitives::traits::{Convert, One, SaturatedConversion, Zero};
 use rstd::{ops::Mul, prelude::*};
 use support::{
     decl_event, decl_module, decl_storage, dispatch::Result, for_each_tuple, StorageMap,
     StorageValue,
 };
-use system::ensure_signed;
 
 // ChainX
-use xaccounts::Name;
+use xr_primitives::Name;
 
 /// A session has changed.
 pub trait OnSessionChange<T> {
@@ -59,6 +58,11 @@ macro_rules! impl_session_change {
 
 for_each_tuple!(impl_session_change);
 
+pub enum SessionKeyUsability<AccountId> {
+    UsedBy(AccountId),
+    Unused,
+}
+
 pub trait Trait: timestamp::Trait + xaccounts::Trait {
     type ConvertAccountIdToSessionKey: Convert<Self::AccountId, Option<Self::SessionKey>>;
     type OnSessionChange: OnSessionChange<Self::Moment>;
@@ -68,14 +72,6 @@ pub trait Trait: timestamp::Trait + xaccounts::Trait {
 decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
         fn deposit_event<T>() = default;
-
-        /// Sets the session key of `_validator` to `_key`. This doesn't take effect until the next
-        /// session.
-        fn set_key(origin, key: T::SessionKey) {
-            let who = ensure_signed(origin)?;
-            // set new value for next session
-            <NextKeyFor<T>>::insert(who, key);
-        }
 
         /// Set a new session length. Won't kick in until the next session change (at current length).
         fn set_length(#[compact] new: T::BlockNumber) {
@@ -107,11 +103,14 @@ decl_storage! {
         /// The current set of validators.
         pub Validators get(validators) config(): Vec<(T::AccountId, u64)>;
         /// Current length of the session.
-        pub SessionLength get(length) config(session_length): T::BlockNumber = T::BlockNumber::sa(1000);
+        pub SessionLength get(length) config(session_length): T::BlockNumber = T::BlockNumber::saturated_from(1000);
         /// Current index of the session.
-        pub CurrentIndex get(current_index) build(|_| T::BlockNumber::sa(0)): T::BlockNumber;
+        pub CurrentIndex get(current_index) build(|_| T::BlockNumber::saturated_from(0)): T::BlockNumber;
         /// Timestamp when current session started.
         pub CurrentStart get(current_start) build(|_| T::Moment::zero()): T::Moment;
+
+        /// Total missed blocks count in the last session.
+        pub SessionTotalMissedBlocksCount get(session_total_missed_blocks_count) : u32;
 
         /// New session is being forced is this entry exists; in which case, the boolean value is whether
         /// the new session should be considered a normal rotation (rewardable) or exceptional (slashable).
@@ -119,9 +118,12 @@ decl_storage! {
         /// Block at which the session length last changed.
         LastLengthChange: Option<T::BlockNumber>;
         /// The next key for a given validator.
-        pub NextKeyFor get(next_key_for) build(|config: &GenesisConfig<T>| {
+        NextKeyFor get(next_key_for) build(|config: &GenesisConfig<T>| {
             config.keys.clone()
         }): map T::AccountId => Option<T::SessionKey>;
+        KeyFilterMap build(|config: &GenesisConfig<T>| {
+            config.keys.clone().into_iter().map(|(a, b)| (b, a)).collect::<Vec<(T::SessionKey, T::AccountId)>>()
+        }): map T::SessionKey => Option<T::AccountId>;
         /// The next session length.
         NextSessionLength: Option<T::BlockNumber>;
     }
@@ -142,6 +144,26 @@ impl<T: Trait> Module<T> {
             let r = Self::next_key_for(&a);
             (a, r)
         })
+    }
+
+    pub fn check_session_key_usability(key: &T::SessionKey) -> SessionKeyUsability<T::AccountId> {
+        if let Some(cur_owner) = <KeyFilterMap<T>>::get(key) {
+            SessionKeyUsability::UsedBy(cur_owner)
+        } else {
+            SessionKeyUsability::Unused
+        }
+    }
+
+    pub fn account_id_for(key: &T::SessionKey) -> Option<T::AccountId> {
+        <KeyFilterMap<T>>::get(key)
+    }
+
+    pub fn set_key(who: &T::AccountId, key: &T::SessionKey) {
+        if let Some(old_key) = <NextKeyFor<T>>::get(who) {
+            <KeyFilterMap<T>>::remove(old_key);
+        }
+        <NextKeyFor<T>>::insert(who, key);
+        <KeyFilterMap<T>>::insert(key, who);
     }
 }
 

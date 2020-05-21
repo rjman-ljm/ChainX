@@ -64,12 +64,36 @@ macro_rules! trace {
 #[inline]
 pub fn u8array_to_addr(s: &[u8]) -> String {
     for i in s {
-        if *i < 0x41 || *i > 0x7A {
-            // 0x41 = 'A' 0x7A = 'z'
+        // 0x30 = '0' 0x39 = '9'; 0x41 = 'A' 0x7A = 'z'
+        if (0x30 <= *i && *i <= 0x39) || (0x41 <= *i && *i <= 0x7A) {
+            continue;
+        } else {
+            // 0x30 = '0' 0x7A = 'z'
             return u8array_to_hex(s); // when any item is not a char, use hex to decode it
         }
     }
     return u8array_to_string(s);
+}
+
+#[cfg(feature = "std")]
+#[inline]
+pub fn try_hex_or_str(src: &[u8]) -> String {
+    let check_is_str = |src: &[u8]| -> bool {
+        for c in src {
+            // 0x21 = !, 0x71 = ~
+            if 0x21 <= *c && *c <= 0x7E {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    };
+    if check_is_str(src) {
+        u8array_to_string(src)
+    } else {
+        u8array_to_hex(src)
+    }
 }
 
 #[cfg(feature = "std")]

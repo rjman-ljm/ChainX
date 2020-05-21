@@ -32,18 +32,18 @@
 // re-export since this is necessary for `impl_apis` in runtime.
 pub use fg_primitives;
 use fg_primitives::ScheduledChange;
-use primitives::traits::{As, Convert, CurrentHeight};
+use parity_codec::{Encode, KeyedVec};
+use primitives::traits::{Convert, CurrentHeight, SaturatedConversion};
 use rstd::prelude::*;
 use substrate_primitives::ed25519::Public as AuthorityId;
+use substrate_primitives::storage::well_known_keys;
 use support::storage::unhashed::StorageVec;
-use support::{decl_event, decl_module, decl_storage, dispatch::Result, StorageValue};
+use support::{decl_event, decl_module, decl_storage, dispatch::Result, storage, StorageValue};
 use system::ensure_signed;
 
 // ChainX
-use xsupport::info;
+use xsupport::{debug, warn};
 
-mod mock;
-mod tests;
 pub mod types;
 
 pub use self::types::{Log, OldStoredPendingChange, RawLog, StoredPendingChange};
@@ -117,14 +117,12 @@ decl_storage! {
         PendingChange get(pending_change): Option<StoredPendingChange<T::BlockNumber, T::SessionKey>>;
         // next block number where we can force a change.
         NextForced get(next_forced): Option<T::BlockNumber>;
-        SessionsPerGrandpa get(sessions_per_grandpa) config(): u32 = 100;
+        SessionsPerGrandpa get(sessions_per_grandpa) config(): u32 = 12;
     }
     add_extra_genesis {
         config(authorities): Vec<(T::SessionKey, u64)>;
 
         build(|storage: &mut primitives::StorageOverlay, _: &mut primitives::ChildrenStorageOverlay, config: &GenesisConfig<T>| {
-            use parity_codec::{Encode, KeyedVec};
-
             let auth_count = config.authorities.len() as u32;
             config.authorities.iter().enumerate().for_each(|(i, v)| {
                 storage.insert((i as u32).to_keyed_vec(
@@ -148,6 +146,10 @@ decl_module! {
             <SessionsPerGrandpa<T>>::put(per_grandpa);
         }
 
+        fn set_finalized_height(height: T::BlockNumber) {
+            storage::unhashed::put(well_known_keys::AURA_FINALIZE, &height.encode());
+        }
+
         fn deposit_event<T>() = default;
 
         /// Report some misbehaviour.
@@ -156,8 +158,9 @@ decl_module! {
             // FIXME: https://github.com/paritytech/substrate/issues/1112
         }
 
-        fn on_finalize(block_number: T::BlockNumber) {
-            if let Some(pending_change) = <PendingChange<T>>::get() {
+        fn on_finalize(_block_number: T::BlockNumber) {
+            /*if let Some(pending_change) = <PendingChange<T>>::get() {
+                debug!("--current block number:{:?}, pending_change scheduled_at:{:?}", block_number, pending_change.scheduled_at);
                 if block_number == pending_change.scheduled_at {
                     if let Some(median) = pending_change.forced {
                         Self::deposit_log(RawLog::ForcedAuthoritiesChangeSignal(
@@ -173,14 +176,14 @@ decl_module! {
                     }
                 }
 
-                if block_number == pending_change.scheduled_at + pending_change.delay {
+                if block_number >= pending_change.scheduled_at + pending_change.delay {
                     Self::deposit_event(
                         RawEvent::NewAuthorities(pending_change.next_authorities.clone())
                     );
                     <AuthorityStorageVec<<T as consensus::Trait>::SessionKey>>::set_items(pending_change.next_authorities);
                     <PendingChange<T>>::kill();
                 }
-            }
+            }*/
         }
     }
 }
@@ -221,7 +224,9 @@ impl<T: Trait> Module<T> {
 
                 // only allow the next forced change when twice the window has passed since
                 // this one.
-                <NextForced<T>>::put(scheduled_at + in_blocks * T::BlockNumber::sa(2));
+                <NextForced<T>>::put(
+                    scheduled_at + in_blocks * T::BlockNumber::saturated_from::<u64>(2),
+                );
             }
 
             <PendingChange<T>>::put(StoredPendingChange {
@@ -237,6 +242,7 @@ impl<T: Trait> Module<T> {
         }
     }
 
+    #[allow(dead_code)]
     /// Deposit one of this module's logs.
     fn deposit_log(log: Log<T>) {
         <system::Module<T>>::deposit_log(<T as Trait>::Log::from(log).into());
@@ -282,10 +288,23 @@ where
         Convert<<T as system::Trait>::AccountId, <T as consensus::Trait>::SessionKey>,
 {
     fn on_session_change() {
-        use primitives::traits::Zero;
+        let total_missed = <xsession::SessionTotalMissedBlocksCount<T>>::take();
+        let finalize_threshold = <xsession::Module<T>>::length().saturated_into::<u64>() / 3;
+        debug!(
+            "[on_session_change of grandpa] total_missed: {:?}, finalize_threshold: {:?}",
+            total_missed, finalize_threshold
+        );
+        if u64::from(total_missed) < finalize_threshold {
+            let height = system::ChainContext::<T>::default().current_height();
+            storage::unhashed::put(well_known_keys::AURA_FINALIZE, &height);
+        } else {
+            warn!("[on_session_change of grandpa] So many missed blocks({:?}) that grandpa fail to finalize.", total_missed);
+        }
+        /*use primitives::traits::Zero;
 
-        if <xsession::Module<T>>::current_index().as_() % <Module<T>>::sessions_per_grandpa() as u64
-            == 0
+        let sessions_per_grandpa = <Module<T>>::sessions_per_grandpa() as u64;
+        if <xsession::Module<T>>::current_index().as_() % sessions_per_grandpa
+            != sessions_per_grandpa - 1
         {
             return;
         }
@@ -309,7 +328,7 @@ where
         );
         if next_authorities != last_authorities {
             let _ = <Module<T>>::schedule_change(next_authorities, Zero::zero(), None);
-        }
+        }*/
     }
 }
 
@@ -325,8 +344,6 @@ where
         // when we record old authority sets, we can use `finality_tracker::median`
         // to figure out _who_ failed. until then, we can't meaningfully guard
         // against `next == last` the way that normal session changes do.
-        info!("-----------on_stalled");
-
         let next_authorities = <xsession::Module<T>>::validators()
             .into_iter()
             .map(|(account_id, weight)| {
@@ -339,7 +356,6 @@ where
             .collect::<Vec<(<T as consensus::Trait>::SessionKey, u64)>>();
 
         let median = <finality_tracker::Module<T>>::median();
-        info!("----on_stalled, next_authorities:{:?}", next_authorities);
 
         // schedule a change for `further_wait` blocks.
         let _ = <Module<T>>::schedule_change(next_authorities, further_wait, Some(median));

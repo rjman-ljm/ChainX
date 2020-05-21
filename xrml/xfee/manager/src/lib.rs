@@ -7,16 +7,22 @@ mod tests;
 pub mod types;
 
 // Substrate
-use primitives::traits::{As, CheckedDiv, CheckedMul, CheckedSub};
+use primitives::traits::{CheckedDiv, CheckedMul, CheckedSub};
+use rstd::collections::btree_map::BTreeMap;
+use rstd::prelude::Vec;
 use rstd::result;
 use support::{decl_event, decl_module, decl_storage, dispatch::Result, StorageValue};
 
 // ChainX
 use chainx_primitives::Acceleration;
-use xaccounts::IntentionJackpotAccountIdFor;
-use xsupport::{trace, warn};
+use xr_primitives::XString;
 
-pub use self::types::SwitchStore;
+use xaccounts::IntentionJackpotAccountIdFor;
+#[cfg(feature = "std")]
+use xsupport::u8array_to_string;
+use xsupport::{info, trace, warn};
+
+pub use self::types::CallSwitcher;
 
 /// Simple payment making trait, operating on a single generic `AccountId` type.
 pub trait MakePayment<AccountId> {
@@ -53,16 +59,78 @@ decl_module! {
             Ok(())
         }
 
-        /// first version, when add more SWITCH, should use new switch
-        fn set_switch_store(switch: SwitchStore) {
-            Switch::<T>::put(switch)
+        /// set open/close for switcher
+        pub fn modify_switcher(switch: CallSwitcher, open: bool) {
+            Switcher::<T>::mutate(|map| {
+                if open {
+                    map.insert(switch, true)
+                } else {
+                    map.remove(&switch)
+                }
+            });
+        }
+
+        pub fn set_switcher(all_switcher: BTreeMap<CallSwitcher, bool>) {
+            Switcher::<T>::put(all_switcher)
+        }
+
+        /// Set a new weight for a method.
+        fn set_method_call_weight(method: Vec<u8>, weight: u64) {
+            <MethodCallWeight<T>>::mutate(|method_weight| {
+                match (*method_weight).insert(method.clone(), weight) {
+                    Some(_a) => {
+                        info!("reset new fee|key:{:}|new value:{:}|old value:{:}", u8array_to_string(&method), weight, _a);
+                    },
+                    None => {
+                        info!("set new fee|key:{:}|value:{:}", u8array_to_string(&method), weight);
+                    },
+                }
+            });
+        }
+
+        /// Remove a method weight.
+        fn remove_method_call_weight(method: Vec<u8>) {
+            <MethodCallWeight<T>>::mutate(|method_weight| {
+                match (*method_weight).remove(&method) {
+                    Some(_a) => {
+                        info!("remove an existing method weight|key:{:}|value:{:}", u8array_to_string(&method), _a);
+                    },
+                    None => {
+                        info!("method {:} does not exist", u8array_to_string(&method));
+                    }
+                }
+            });
+        }
+
+        // due history reasons, can't export call in runtime for module `XAccounts`,
+        // thus let `XAccounts` root call in `XFeeManager` module
+        // blocked_accounts
+        /// add an account into blocked list
+        fn add_blocked_account(who: T::AccountId) {
+            xaccounts::BlockedAccounts::<T>::mutate(|list| {
+                if !list.contains(&who) {
+                    list.push(who);
+                }
+            });
+        }
+        /// remove an account into blocked list
+        fn remove_blocked_account(who: T::AccountId) {
+            xaccounts::BlockedAccounts::<T>::mutate(|list| {
+                list.retain(|i| *i != who);
+            });
         }
     }
 }
 
 decl_storage! {
     trait Store for Module<T: Trait> as XFeeManager {
-        pub Switch get(switch): SwitchStore; // Emergency control
+        // deprecated in v1.0.3
+        // pub Switch get(switch): SwitchStore;
+        pub Switcher get(switcher): BTreeMap<CallSwitcher, bool>;
+        /// Emergency control
+        /// Each callable method in runtime normally has a different weight.
+        pub MethodCallWeight get(method_call_weight): BTreeMap<XString, u64>;
+        /// How much fee of a block should be rewarded to the block producer.
         pub ProducerFeeProportion get(producer_fee_proportion) config(): (u32, u32);
         /// The fee to be paid for making a transaction; the base.
         pub TransactionBaseFee get(transaction_base_fee) config(): T::Balance;
@@ -101,13 +169,13 @@ impl<T: Trait> MakePayment<T::AccountId> for Module<T> {
 }
 
 impl<T: Trait> Module<T> {
-    pub fn set_switch(store: SwitchStore) {
-        Switch::<T>::put(store);
+    pub fn get_switcher(switcher: CallSwitcher) -> bool {
+        Self::switcher().get(&switcher).map(|b| *b).unwrap_or(false)
     }
 
     pub fn transaction_fee(power: u64, encoded_len: u64) -> T::Balance {
-        Self::transaction_base_fee() * <T::Balance as As<u64>>::sa(power)
-            + Self::transaction_byte_fee() * <T::Balance as As<u64>>::sa(encoded_len)
+        Self::transaction_base_fee() * power.into()
+            + Self::transaction_byte_fee() * encoded_len.into()
     }
 
     fn calc_fee_and_check(
@@ -118,7 +186,7 @@ impl<T: Trait> Module<T> {
     ) -> result::Result<T::Balance, &'static str> {
         let b = xassets::Module::<T>::pcx_free_balance(transactor);
 
-        let transaction_fee = Self::transaction_fee(power, encoded_len as u64) * As::sa(acc as u64);
+        let transaction_fee = Self::transaction_fee(power, encoded_len as u64) * acc.into();
 
         if b < transaction_fee {
             return Err("not enough funds for transaction fee");
@@ -130,8 +198,8 @@ impl<T: Trait> Module<T> {
         let proportion = Self::producer_fee_proportion();
 
         // for_producer = fee * rate.0 / rate.1
-        let for_producer = match fee.checked_mul(&As::sa(proportion.0 as u64)) {
-            Some(r) => match r.checked_div(&As::sa(proportion.1 as u64)) {
+        let for_producer = match fee.checked_mul(&(proportion.0).into()) {
+            Some(r) => match r.checked_div(&(proportion.1).into()) {
                 Some(r) => r,
                 None => return Err("[fee]calc fee proportion dev overflow!"),
             },
@@ -145,7 +213,7 @@ impl<T: Trait> Module<T> {
         };
 
         if let Some(p) = xsystem::Module::<T>::block_producer() {
-            let jackpot_addr = T::DetermineIntentionJackpotAccountId::accountid_for(&p);
+            let jackpot_addr = T::DetermineIntentionJackpotAccountId::accountid_for_unsafe(&p);
 
             trace!(
                 "[calc_fee]|move fee|from:{:},{:?}|to jackpot:{:},{:?}|to_producer:{:},{:}",
@@ -167,7 +235,7 @@ impl<T: Trait> Module<T> {
 
             Self::deposit_event(RawEvent::FeeForJackpot(jackpot_addr, for_jackpot));
         } else {
-            let council = xaccounts::Module::<T>::council_address();
+            let council = xaccounts::Module::<T>::council_account();
 
             warn!(
                 "[calc_fee]|current block not set producer!|council:{:},{:?}",

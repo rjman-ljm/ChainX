@@ -1,6 +1,6 @@
 [package]
 name = "chainx-runtime"
-version = "0.4.0"
+version = "1.0.0"
 authors = ["Chainpool <http://www.chainx.org>"]
 edition = "2018"
 
@@ -10,24 +10,24 @@ safe-mix = { version = "1.0", default-features = false }
 serde = { version = "1.0", optional = true }
 parity-codec = { version = "3.3", default-features = false }
 
-client = { package = "substrate-client", git = "https://github.com/chainpool/substrate", default-features = false }
-substrate-primitives = { git = "https://github.com/chainpool/substrate", default-features = false }
-consensus_aura = { package = "substrate-consensus-aura-primitives", git = "https://github.com/chainpool/substrate", default-features = false }
-consensus_authorities = { package = "substrate-consensus-authorities", git = "https://github.com/chainpool/substrate", default-features = false }
-offchain-primitives = { package = "substrate-offchain-primitives", git = "https://github.com/chainpool/substrate", default-features = false }
+client = { package = "substrate-client", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+substrate-primitives = { git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+consensus_aura = { package = "substrate-consensus-aura-primitives", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+consensus_authorities = { package = "substrate-consensus-authorities", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+offchain-primitives = { package = "substrate-offchain-primitives", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
 
-runtime-primitives = { package = "sr-primitives", git = "https://github.com/chainpool/substrate", default-features = false }
-runtime-io = { package = "sr-io", git = "https://github.com/chainpool/substrate", default-features = false }
-version = { package = "sr-version", git = "https://github.com/chainpool/substrate", default-features = false }
-rstd = { package = "sr-std", git = "https://github.com/chainpool/substrate", default-features = false }
+runtime-primitives = { package = "sr-primitives", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+runtime-io = { package = "sr-io", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+version = { package = "sr-version", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+rstd = { package = "sr-std", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
 
-support = { package = "srml-support", git = "https://github.com/chainpool/substrate", default-features = false }
-system = { package = "srml-system", git = "https://github.com/chainpool/substrate", default-features = false }
-timestamp = { package = "srml-timestamp", git = "https://github.com/chainpool/substrate", default-features = false }
-consensus = { package = "srml-consensus", git = "https://github.com/chainpool/substrate", default-features = false }
-sudo = { package = "srml-sudo", git = "https://github.com/chainpool/substrate", default-features = false }
-indices = { package = "srml-indices", git = "https://github.com/chainpool/substrate", default-features = false }
-finality-tracker = { package = "srml-finality-tracker", git = "https://github.com/chainpool/substrate", default-features = false }
+support = { package = "srml-support", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+system = { package = "srml-system", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+timestamp = { package = "srml-timestamp", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+consensus = { package = "srml-consensus", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+sudo = { package = "srml-sudo", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+indices = { package = "srml-indices", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
+finality-tracker = { package = "srml-finality-tracker", git = "https://github.com/chainpool/substrate", branch="chainx-master", default-features = false }
 
 # chainx
 chainx-primitives = { path = "../primitives", default-features = false }
@@ -51,15 +51,21 @@ xprocess = { package = "xrml-xassets-process", path = "../xrml/xassets/process",
 xstaking = { package = "xrml-xmining-staking", path = "../xrml/xmining/staking", default-features = false }
 xtokens = { package = "xrml-xmining-tokens", path = "../xrml/xmining/tokens", default-features = false }
 # bridge
+xbridge-common = { package = "xrml-xbridge-common", path = "../xrml/xbridge/common", default-features = false }
 xbitcoin = { package = "xrml-xbridge-bitcoin", path = "../xrml/xbridge/bitcoin", default-features = false }
+xbridge-features = { package = "xrml-xbridge-features", path = "../xrml/xbridge/features", default-features = false }
 xsdot = { package = "xrml-xbridge-sdot", path = "../xrml/xbridge/sdot", default-features = false }
 # dex
 xspot = { package = "xrml-xdex-spot", path = "../xrml/xdex/spot", default-features = false }
+# fisher
+xfisher = { package = "xrml-xfisher", path = "../xrml/xfisher", default-features = false }
 # multisig
 xmultisig = { package = "xrml-xmultisig", path = "../xrml/xmultisig", default-features = false }
+# contracts
+xcontracts = { package = "xrml-xcontracts", path = "../xrml/xcontracts", default-features = false }
 
 [dev-dependencies]
-hex-literal = "0.1.0"
+hex-literal = "0.2.0"
 
 [features]
 default = ["std"]
@@ -87,6 +93,7 @@ std = [
     "consensus/std",
     "sudo/std",
     "indices/std",
+    "finality-tracker/std",
 
     # chainx
     "chainx-primitives/std",
@@ -107,14 +114,19 @@ std = [
     "xassets/std",
     "xrecords/std",
     "xprocess/std",
+    "xfisher/std",
     # mining
     "xstaking/std",
     "xtokens/std",
     # bridge
+    "xbridge-common/std",
     "xbitcoin/std",
     "xsdot/std",
+    "xbridge-features/std",
     # dex
     "xspot/std",
     # multisig
     "xmultisig/std",
+    # contracts
+    "xcontracts/std",
 ]

@@ -19,39 +19,35 @@ use support::{
 };
 use system::ensure_signed;
 
-// ChainX
-use xr_primitives::traits::TrusteeForChain;
-
-use xassets::Chain;
 use xsupport::{debug, error, info};
 
-pub use self::types::{AddrInfo, AddrType, PendingState};
+pub use self::types::{AddrInfo, AddrType, MultiSigPermission, PendingState};
 
-const MAX_OWNERS: u32 = 32;
+// MAX_OWNERS equal PendingState.owners_done bits length
+const MAX_OWNERS: u32 = 64;
 const MAX_PENDING: u32 = 5;
 
 pub trait MultiSigFor<AccountId: Sized, Hash: Sized> {
     /// generate multisig addr for a accountid
     fn multi_sig_addr_for(who: &AccountId) -> AccountId;
 
-    fn multi_sig_addr_for_trustees(chain: Chain, trustees: &Vec<AccountId>) -> AccountId;
-
     fn multi_sig_id_for(who: &AccountId, addr: &AccountId, data: &[u8]) -> Hash;
 }
 
 pub trait GenesisMultiSig<AccountId> {
-    fn gen_genesis_multisig(accounts: Vec<AccountId>) -> (AccountId, AccountId);
+    fn gen_genesis_multisig() -> (AccountId, AccountId);
 }
 
-pub trait TrusteeCall<AccountId> {
+pub trait LimitedCall<AccountId> {
     fn allow(&self) -> bool;
     fn exec(&self, exerciser: &AccountId) -> Result;
 }
 
-pub trait Trait: xassets::Trait + xaccounts::Trait + xbitcoin::Trait {
+pub trait Trait: xaccounts::Trait {
     type MultiSig: MultiSigFor<Self::AccountId, Self::Hash>;
     type GenesisMultiSig: GenesisMultiSig<Self::AccountId>;
-    type Proposal: Parameter + Dispatchable<Origin = Self::Origin> + TrusteeCall<Self::AccountId>;
+    type Proposal: Parameter + Dispatchable<Origin = Self::Origin>;
+    type TrusteeCall: LimitedCall<Self::AccountId> + From<Self::Proposal>;
     /// The overarching event type.
     type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
@@ -71,15 +67,6 @@ where
         UncheckedFrom::unchecked_from(T::Hashing::hash(&buf[..]))
     }
 
-    fn multi_sig_addr_for_trustees(chain: Chain, trustees: &Vec<T::AccountId>) -> T::AccountId {
-        let mut buf = Vec::<u8>::new();
-        buf.extend_from_slice(&chain.encode());
-        for trustee in trustees {
-            buf.extend_from_slice(trustee.as_ref());
-        }
-        UncheckedFrom::unchecked_from(T::Hashing::hash(&buf[..]))
-    }
-
     fn multi_sig_id_for(who: &T::AccountId, addr: &T::AccountId, data: &[u8]) -> T::Hash {
         let mut buf = Vec::<u8>::new();
         buf.extend_from_slice(who.as_ref());
@@ -95,14 +82,9 @@ impl<T: Trait> GenesisMultiSig<T::AccountId> for ChainXGenesisMultisig<T>
 where
     T::AccountId: UncheckedFrom<T::Hash> + AsRef<[u8]>,
 {
-    fn gen_genesis_multisig(accounts: Vec<T::AccountId>) -> (T::AccountId, T::AccountId) {
-        let mut buf = Vec::<u8>::new();
-        buf.extend_from_slice(b"Team");
-        for a in accounts.iter() {
-            buf.extend_from_slice(a.as_ref());
-        }
+    fn gen_genesis_multisig() -> (T::AccountId, T::AccountId) {
         let team_multisig_addr: T::AccountId =
-            UncheckedFrom::unchecked_from(T::Hashing::hash(&buf[..]));
+            UncheckedFrom::unchecked_from(T::Hashing::hash(&b"Team"[..]));
         let council_multisig_addr: T::AccountId =
             UncheckedFrom::unchecked_from(T::Hashing::hash(&b"Council"[..]));
         (team_multisig_addr, council_multisig_addr)
@@ -113,7 +95,6 @@ decl_event!(
     pub enum Event<T> where
         <T as system::Trait>::AccountId,
         <T as system::Trait>::Hash,
-        <T as xassets::Trait>::Balance,
         <T as Trait>::Proposal
     {
         /// deploy a multisig and get address, who deploy, deploy addr, owners num, required num
@@ -121,17 +102,10 @@ decl_event!(
         /// exec. who, addr, multisigid, type
         ExecMultiSig(AccountId, AccountId, Hash, Box<Proposal>),
         /// confirm. addr, multisigid, yet_needed, owners_done
-        Confirm(AccountId, Hash, u32, u32),
+        Confirm(AccountId, Hash, u32, u64),
 
         /// remove multisig id for a multisig addr
         RemoveMultiSigIdFor(AccountId, Hash),
-
-        /// set deploy fee, by Root
-        SetDeployFee(Balance),
-        /// set exec fee, by Root
-        SetExecFee(Balance),
-        /// set confirm fee, by Root
-        SetConfirmFee(Balance),
     }
 );
 
@@ -139,27 +113,26 @@ decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
         fn deposit_event<T>() = default;
 
-        fn deploy(origin, owners: Vec<(T::AccountId, bool)>, required_num: u32) -> Result {
-            let from = ensure_signed(origin)?;
-            let multisig_addr: T::AccountId = T::MultiSig::multi_sig_addr_for(&from);
-            debug!("[deploy]|deploy for new mutisig addr|who:{:?}|new multisig addr:{:?}|required:{:}|owners:{:?}", from, multisig_addr, required_num, owners);
-            Self::deploy_impl(AddrType::Normal, &multisig_addr, &from, owners, required_num)
-        }
+        // not open for public
+        // fn deploy(origin, owners: Vec<(T::AccountId, bool)>, required_num: u32) -> Result {
+        //     let from = ensure_signed(origin)?;
+        //     let multisig_addr: T::AccountId = T::MultiSig::multi_sig_addr_for(&from);
+        //     debug!("[deploy]|deploy for new mutisig addr|who:{:?}|new multisig addr:{:?}|required:{:}|owners:{:?}", from, multisig_addr, required_num, owners);
+        //     Self::deploy_impl(AddrType::Normal, &multisig_addr, &from, owners, required_num)
+        // }
 
         fn execute(origin, multi_sig_addr: T::AccountId, proposal: Box<T::Proposal>) -> Result {
             let from: T::AccountId = ensure_signed(origin)?;
             debug!("[execute]|create a proposal|who:{:?}|for addr:{:?}|proposal:{:?}", from, multi_sig_addr, proposal);
             Self::execute_impl(&from, &multi_sig_addr, proposal)
         }
+
         fn confirm(origin, multi_sig_addr: T::AccountId, multi_sig_id: T::Hash) -> Result {
             let from = ensure_signed(origin)?;
             debug!("[execute]|confirm for a proposal|who:{:?}|for addr:{:?}|multi_sig_id:{:}", from, multi_sig_addr, multi_sig_id);
             Self::confirm_impl(&from, &multi_sig_addr, multi_sig_id)
         }
-        fn is_owner_for(origin, multi_sig_addr: T::AccountId) -> Result {
-            let from = ensure_signed(origin)?;
-            Self::is_owner(&from, &multi_sig_addr, false).map(|_| ())
-        }
+
         // remove multisig addr
         fn remove_multi_sig_for(origin, multi_sig_addr: T::AccountId, multi_sig_id: T::Hash) -> Result {
             let from: T::AccountId = ensure_signed(origin)?;
@@ -168,30 +141,35 @@ decl_module! {
             Self::remove_multi_sig_id(&multi_sig_addr, multi_sig_id);
             Ok(())
         }
-        /// use for trustee multisig addr
-        pub fn transition_trustee_session(origin, chain: Chain, new_trustees: Vec<T::AccountId>) -> Result {
-            let who = ensure_signed(origin)?;
-            // judge current addr
-            let current_multisig_addr = Self::trustee_multisig_addr(chain);
-            if current_multisig_addr != who {
-                error!("[transition_trustee_session]|invoker not match current trustee multisig addr for this chain|chain:{:?}|current:{:?}|who:{:?}", chain, current_multisig_addr, who);
-                return Err("invoker not match current trustee multisig addr for this chain");
-            }
-            info!("[transition_trustee_session]|try to transition trustee|from multisig addr:{:?}|chain:{:?}|new_trustees:{:?}", current_multisig_addr, chain, new_trustees);
-            Self::transition_trustee_session_impl(chain, new_trustees)
-        }
 
-        /// only for root!
-        pub fn transition_trustee_session_by_root(chain: Chain, new_trustees: Vec<T::AccountId>) -> Result {
-            info!("[transition_trustee_session_by_root]|try to transition trustee|chain:{:?}|new_trustees:{:?}", chain, new_trustees);
-            Self::transition_trustee_session_impl(chain, new_trustees)
+        /// transition current owners to other group for the multisig addr.
+        /// this call can't be called from user directly, only allow call from `execute` proposal.
+        fn transition(origin, owners: Vec<(T::AccountId, bool)>, required_num: u32) -> Result {
+            let multi_sig_addr = ensure_signed(origin)?;
+            if owners.is_empty() {
+                return Err("owners can't be empty.");
+            }
+
+            let addr_info = Self::multisig_addr_info(&multi_sig_addr).ok_or("multisig address not exist.")?;
+
+            let owners = owners.into_iter().map(|(a, permission)| {
+                let p = if permission {
+                    MultiSigPermission::ConfirmAndPropose
+                } else {
+                    MultiSigPermission::ConfirmOnly
+                };
+                (a, p)
+            }).collect::<Vec<_>>();
+
+            let deploy = owners[0].0.clone();
+            Self::deploy_impl(addr_info.addr_type, &multi_sig_addr, &deploy, owners, required_num)
         }
     }
 }
 
 decl_storage! {
     trait Store for Module<T: Trait> as XMultiSig {
-        pub RootAddrList get(root_addr_list): Vec <T::AccountId>;
+        pub RootAddrList get(root_addr_list): Vec<T::AccountId>;
 
         pub MultiSigAddrInfo get(multisig_addr_info): map T::AccountId => Option<AddrInfo<T::AccountId>>;
 
@@ -201,9 +179,6 @@ decl_storage! {
         // for deployer
         pub MultiSigListItemFor get(multi_sig_list_item_for): map (T::AccountId, u32) => T::AccountId;
         pub MultiSigListLenFor get(multi_sig_list_len_for): map T::AccountId => u32;
-
-        // for trustee
-        pub TrusteeMultiSigAddr get(trustee_multisig_addr): map Chain => T::AccountId;
     }
 }
 
@@ -235,7 +210,7 @@ impl<T: Trait> Module<T> {
         if let Some(addr_info) = Self::multisig_addr_info(addr) {
             for (index, (id, req)) in addr_info.owner_list.iter().enumerate() {
                 if id == who {
-                    if required && (*req == false) {
+                    if required && (*req == MultiSigPermission::ConfirmOnly) {
                         return Err("it's the owner but not required owner");
                     } else {
                         return Ok(index as u32);
@@ -301,35 +276,17 @@ impl<T: Trait> Module<T> {
 }
 
 impl<T: Trait> Module<T> {
-    fn transition_trustee_session_impl(chain: Chain, new_trustees: Vec<T::AccountId>) -> Result {
-        // check trustees
-        for candidate in new_trustees.iter() {
-            let key = (candidate.clone(), chain);
-            if xaccounts::Module::<T>::trustee_intention_props_of(&key).is_none() {
-                error!("[transition_trustee_session]|not all candidate has registered as a trustee yet|chain:{:?}|who:{:?}", chain, candidate);
-                return Err("not all candidate has registered as a trustee yet");
-            }
-        }
-
-        let trustees = match chain {
-            Chain::Bitcoin => xbitcoin::Module::<T>::generate_new_trustees(&new_trustees)?,
-            _ => return Err("no transition trustee support for this chain"),
-        };
-
-        Self::deploy_trustee_addr(chain, trustees)
-    }
-}
-
-impl<T: Trait> Module<T> {
-    fn deploy_impl(
+    pub fn deploy_impl(
         addr_type: AddrType,
         multi_addr: &T::AccountId,
         deployer: &T::AccountId,
-        owners: Vec<(T::AccountId, bool)>,
+        owners: Vec<(T::AccountId, MultiSigPermission)>,
         required_num: u32,
     ) -> Result {
         let mut owner_list = Vec::new();
-        owner_list.push((deployer.clone(), true));
+        // confirm owners has deployer
+        owner_list.push((deployer.clone(), MultiSigPermission::ConfirmAndPropose));
+        // move others people except deployer
         owner_list.extend(owners.into_iter().filter(|info| {
             if info.0 == *deployer {
                 false
@@ -340,14 +297,21 @@ impl<T: Trait> Module<T> {
 
         let owners_len = owner_list.len() as u32;
         if owners_len > MAX_OWNERS {
+            error!("[deploy_impl]|total owners count can't more than `MAX_OWNERS`|owners_len:{:}|MAX_OWNERS:{:?}", owners_len, MAX_OWNERS);
             return Err("total owners can't more than `MAX_OWNERS`");
         }
 
         if owners_len < required_num {
+            error!(
+                "[deploy_impl]|owners count can't less than required num|owners_len:{:}|required_num:{:?}",
+                owners_len, required_num
+            );
             return Err("owners count can't less than required num");
         }
 
-        // 1
+        // 1, set multi_addr for current deployer. notice when transition for same deployer, the
+        // multisiglist would log duplicate multisig addr. removing duplicate is meaningless
+        // for duplicate can imply different session of transition
         let len = Self::multi_sig_list_len_for(deployer);
         <MultiSigListItemFor<T>>::insert(&(deployer.clone(), len), multi_addr.clone());
         <MultiSigListLenFor<T>>::insert(deployer.clone(), len + 1); // length inc
@@ -369,81 +333,70 @@ impl<T: Trait> Module<T> {
         Ok(())
     }
 
-    fn deploy_trustee_addr(chain: Chain, trustee_list: Vec<T::AccountId>) -> Result {
-        // generate new addr
-        let addr = T::MultiSig::multi_sig_addr_for_trustees(chain, &trustee_list);
-        let deployer = trustee_list
-            .get(0)
-            .ok_or("the trustee_list len must large than 1")?
-            .clone();
-        // calc required num
-        let a = 2 * trustee_list.len() as u32;
-        let required_num = if a % 3 == 0 { a / 3 } else { a / 3 + 1 };
-
-        let trustee_list = trustee_list
-            .into_iter()
-            .map(|accountid| (accountid, true))
-            .collect::<Vec<_>>();
-        Self::deploy_impl(
-            AddrType::Trustee,
-            &addr,
-            &deployer,
-            trustee_list,
-            required_num,
-        )?;
-        // change TrusteeMultiSigAddr
-        TrusteeMultiSigAddr::<T>::insert(chain, addr);
-        Ok(())
+    pub fn deploy_impl_unsafe(
+        addr_type: AddrType,
+        multi_addr: &T::AccountId,
+        deployer: &T::AccountId,
+        owners: Vec<(T::AccountId, MultiSigPermission)>,
+        required_num: u32,
+    ) {
+        let _ = Self::deploy_impl(addr_type, multi_addr, deployer, owners, required_num)
+            .map_err(|e| panic!(e));
     }
 
     #[cfg(feature = "std")]
     pub fn deploy_in_genesis(
-        owners: Vec<(T::AccountId, bool)>,
-        required_num: u32,
-        trustees: Vec<(Chain, Vec<T::AccountId>)>,
-    ) {
+        team: Vec<(T::AccountId, MultiSigPermission)>,
+        team_required_num: u32,
+        council: Vec<(T::AccountId, MultiSigPermission)>,
+        council_required_num: u32,
+    ) -> result::Result<T::AccountId, &'static str> {
         use support::StorageValue;
 
-        if owners.len() < 1 {
+        if team.len() < 1 || council.len() < 1 {
+            error!(
+                "[deploy_in_genesis]|the team:{:?} and council:{:?} count can't be zero",
+                team.len(),
+                council.len()
+            );
             panic!("the owners count can't be zero");
         }
-        let deployer = owners.get(0).unwrap().clone().0;
+        let team_deployer = team.get(0).unwrap().clone().0;
 
-        let (team_multisig_addr, council_multisig_addr) = T::GenesisMultiSig::gen_genesis_multisig(
-            owners.iter().map(|(a, _)| a.clone()).collect(),
-        );
+        let (team_multisig_addr, council_multisig_addr) =
+            T::GenesisMultiSig::gen_genesis_multisig();
 
-        let _ = Self::deploy_impl(
+        Self::deploy_impl(
             AddrType::Normal,
             &team_multisig_addr,
-            &deployer,
-            owners.clone(),
-            required_num,
-        );
-        let _ = Self::deploy_impl(
+            &team_deployer,
+            team,
+            team_required_num,
+        )?;
+
+        let council_deployer = council.get(0).unwrap().clone().0;
+        Self::deploy_impl(
             AddrType::Root,
             &council_multisig_addr,
-            &deployer,
-            owners.clone(),
-            required_num,
-        );
+            &council_deployer,
+            council,
+            council_required_num,
+        )?;
 
         RootAddrList::<T>::put(vec![council_multisig_addr.clone()]);
 
-        // deploy trustee
-        for (chain, trustee_list) in trustees {
-            let _ = Self::transition_trustee_session_impl(chain, trustee_list);
-        }
+        xaccounts::TeamAccount::<T>::put(&team_multisig_addr);
+        xaccounts::CouncilAccount::<T>::put(council_multisig_addr);
 
-        // set to related place
-        xaccounts::TeamAddress::<T>::put(team_multisig_addr);
-        xaccounts::CouncilAddress::<T>::put(council_multisig_addr);
+        Ok(team_multisig_addr)
     }
 
     fn check_proposal(addr_info: &AddrInfo<T::AccountId>, proposal: &Box<T::Proposal>) -> Result {
         match addr_info.addr_type {
             AddrType::Trustee => {
-                if proposal.allow() {
+                // it's an useless clone, but do not have other way
+                let p: T::TrusteeCall = (**proposal).clone().into();
+                if p.allow() {
                     Ok(())
                 } else {
                     error!("[check_proposal]|do not allow trustee multisig addr to call this proposal|proposal:{:?}", proposal);
@@ -590,6 +543,7 @@ impl<T: Trait> Module<T> {
             "[exec_tx_bytrustee]|real exec|addr:{:?}|proposal:{:?}",
             addr, proposal
         );
-        proposal.exec(addr)
+        let p: T::TrusteeCall = (*proposal).into();
+        p.exec(addr)
     }
 }

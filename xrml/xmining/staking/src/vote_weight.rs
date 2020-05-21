@@ -3,289 +3,135 @@
 
 use super::*;
 
-use rstd::result;
-use xsupport::{error, trace};
+use xsupport::{debug, error, trace};
 
-pub trait VoteWeight<BlockNumber: As<u64>> {
-    fn amount(&self) -> u64;
-    fn last_acum_weight(&self) -> u64;
-    fn last_acum_weight_update(&self) -> u64;
-
-    fn latest_acum_weight(&self, current_block: BlockNumber) -> u64 {
-        self.last_acum_weight()
-            + self.amount() * (current_block.as_() - self.last_acum_weight_update())
-    }
-
-    fn set_amount(&mut self, value: u64, to_add: bool);
-    fn set_last_acum_weight(&mut self, s: u64);
-    fn set_last_acum_weight_update(&mut self, num: BlockNumber);
-}
-
-impl<B, C> VoteWeight<C> for IntentionProfs<B, C>
-where
-    B: Default + As<u64> + Clone,
-    C: Default + As<u64> + Clone,
-{
-    fn amount(&self) -> u64 {
-        self.total_nomination.clone().as_()
-    }
-
-    fn last_acum_weight(&self) -> u64 {
-        self.last_total_vote_weight as u64
-    }
-
-    fn last_acum_weight_update(&self) -> u64 {
-        self.last_total_vote_weight_update.clone().as_()
-    }
-
-    fn set_amount(&mut self, value: u64, to_add: bool) {
-        let mut amount = Self::amount(self);
-        if to_add {
-            amount += value;
-        } else {
-            amount -= value;
+/// Compute the dividend by a ration of source_vote_weight/target_vote_weight.
+///
+/// dividend = source_vote_weight/target_vote_weight * balance_of(claimee_jackpot)
+pub fn compute_dividend<T: Trait>(
+    source_vote_weight: u128,
+    target_vote_weight: u128,
+    claimee_jackpot: &T::AccountId,
+) -> T::Balance {
+    let total_jackpot = xassets::Module::<T>::pcx_free_balance(&claimee_jackpot);
+    let dividend = match source_vote_weight.checked_mul(u128::from(total_jackpot.saturated_into()))
+    {
+        Some(x) => ((x / target_vote_weight) as u64).into(),
+        None => {
+            error!(
+                "[compute_dividvid] overflow: source_vote_weight({:?}) * total_jackpot({:?})",
+                source_vote_weight, total_jackpot
+            );
+            panic!("source_vote_weight * total_jackpot overflow")
         }
-        self.total_nomination = B::sa(amount);
-    }
+    };
 
-    fn set_last_acum_weight(&mut self, latest_vote_weight: u64) {
-        self.last_total_vote_weight = latest_vote_weight;
-    }
+    trace!(
+        target: "claim",
+        "[compute_dividvid] source_vote_weight/target_vote_weight: {:?}/{:?}, total_jackpot: {:?}, dividend: {:?}",
+        source_vote_weight, target_vote_weight, total_jackpot, dividend
+    );
 
-    fn set_last_acum_weight_update(&mut self, current_block: C) {
-        self.last_total_vote_weight_update = current_block;
-    }
-}
-
-impl<B, C> VoteWeight<C> for NominationRecord<B, C>
-where
-    B: Default + As<u64> + Clone,
-    C: Default + As<u64> + Clone,
-{
-    fn amount(&self) -> u64 {
-        self.nomination.clone().as_()
-    }
-
-    fn last_acum_weight(&self) -> u64 {
-        self.last_vote_weight
-    }
-
-    fn last_acum_weight_update(&self) -> u64 {
-        self.last_vote_weight_update.clone().as_()
-    }
-
-    fn set_amount(&mut self, value: u64, to_add: bool) {
-        let mut amount = Self::amount(self);
-        if to_add {
-            amount += value;
-        } else {
-            amount -= value;
-        }
-        self.nomination = B::sa(amount);
-    }
-
-    fn set_last_acum_weight(&mut self, latest_vote_weight: u64) {
-        self.last_vote_weight = latest_vote_weight;
-    }
-
-    fn set_last_acum_weight_update(&mut self, current_block: C) {
-        self.last_vote_weight_update = current_block;
-    }
+    dividend
 }
 
 impl<T: Trait> Module<T> {
-    pub fn generic_update_vote_weight<V: VoteWeight<T::BlockNumber>>(who: &mut V) {
-        let current_block = <system::Module<T>>::block_number();
-
-        let latest_acum_weight = who.latest_acum_weight(current_block);
-
-        who.set_last_acum_weight(latest_acum_weight);
-        who.set_last_acum_weight_update(current_block);
+    pub(super) fn deposit_claim_event(
+        source_weight_info: (u128, bool),
+        target_weight_info: (u128, bool),
+        _source: &T::AccountId,
+        _target: &T::AccountId,
+        dividend: T::Balance,
+    ) {
+        let (source_vote_weight, source_overflow) = source_weight_info;
+        let (target_vote_weight, target_overflow) = target_weight_info;
+        if !source_overflow && !target_overflow {
+            Self::deposit_event(RawEvent::Claim(
+                source_vote_weight as u64,
+                target_vote_weight as u64,
+                dividend,
+            ));
+        } else {
+            Self::deposit_event(RawEvent::ClaimV1(
+                source_vote_weight,
+                target_vote_weight,
+                dividend,
+            ));
+        }
     }
 
-    fn generic_apply_delta<V: VoteWeight<T::BlockNumber>>(who: &mut V, value: u64, to_add: bool) {
-        who.set_amount(value, to_add);
-    }
+    pub(super) fn apply_update_staker_vote_weight(
+        source: &T::AccountId,
+        target: &T::AccountId,
+        source_vote_weight: u128,
+        current_block: T::BlockNumber,
+        delta: &Delta,
+    ) {
+        let key = (source.clone(), target.clone());
 
-    fn channel_or_council_of(who: &T::AccountId, token: &Token) -> T::AccountId {
-        let council_address = xaccounts::Module::<T>::council_address();
-
-        if let Some(asset_info) = <xassets::AssetInfo<T>>::get(token) {
-            let asset = asset_info.0;
-            let chain = asset.chain();
-
-            let bind = <xaccounts::CrossChainBindOf<T>>::get(&(chain, who.clone()));
-            if let Some(first_bind) = bind.get(0) {
-                if let Some((_accountid, channel_accountid)) =
-                    <xaccounts::CrossChainAddressMapOf<T>>::get(&(chain, first_bind.clone()))
-                {
-                    // if the channel not set for this addr, return council_addr instead
-                    return channel_accountid.unwrap_or(council_address);
+        let record_result = Self::try_get_nomination_record(&key);
+        if record_result.is_ok() && source_vote_weight <= u128::from(u64::max_value()) {
+            let mut record = match record_result {
+                Ok(record) => record,
+                _ => panic!("Impossible, checked already; qed"),
+            };
+            record.set_state(source_vote_weight as u64, current_block, delta);
+            <NominationRecords<T>>::insert(&key, record);
+        } else {
+            let mut record_v1 = match record_result {
+                Ok(record) => {
+                    debug!("[switch_to_u128] remove {:?} from NominationRecords due to the source_vote_weight is overflow: {:?}", &key, source_vote_weight);
+                    <NominationRecords<T>>::remove(&key);
+                    record.into()
                 }
-            }
+                Err(record_v1) => record_v1,
+            };
+            record_v1.set_state(source_vote_weight, current_block, delta);
+            <NominationRecordsV1<T>>::insert(&key, record_v1);
         }
-
-        return council_address;
     }
 
-    pub fn generic_claim<U, V>(
-        source: &mut U,
+    pub(super) fn apply_update_intention_vote_weight(
+        target: &T::AccountId,
+        new_target_vote_weight: u128,
+        current_block: T::BlockNumber,
+        delta: &Delta,
+    ) {
+        let iprof_result = Self::try_get_intention_profs(target);
+
+        if iprof_result.is_ok() && new_target_vote_weight <= u128::from(u64::max_value()) {
+            let mut iprof = match iprof_result {
+                Ok(iprof) => iprof,
+                _ => panic!("Impossible, checked already; qed"),
+            };
+            iprof.set_state(new_target_vote_weight as u64, current_block, delta);
+            <Intentions<T>>::insert(target, iprof);
+        } else {
+            let mut iprof_v1 = match iprof_result {
+                Ok(iprof) => {
+                    debug!("[switch_to_u128] remove {:?} from Intentions due to the new_target_vote_weight is overflow: {:?}", target, new_target_vote_weight);
+                    <Intentions<T>>::remove(target);
+                    iprof.into()
+                }
+                Err(iprof_v1) => iprof_v1,
+            };
+            iprof_v1.set_state(new_target_vote_weight, current_block, delta);
+            <IntentionsV1<T>>::insert(target, iprof_v1);
+        }
+    }
+
+    pub(super) fn apply_state_change_on_claim(
         who: &T::AccountId,
-        target: &mut V,
-        target_jackpot_addr: &T::AccountId,
-        claim_type: ClaimType,
-    ) -> result::Result<(u64, u64, T::Balance), &'static str>
-    where
-        U: VoteWeight<T::BlockNumber>,
-        V: VoteWeight<T::BlockNumber>, // + Jackpot<T::Balance>,
-    {
-        let current_block = <system::Module<T>>::block_number();
-
-        let source_vote_weight = source.latest_acum_weight(current_block);
-
-        trace!(
-            target: "claim",
-            "[generic_claim] [source info] last_acum_weight({:?}) + amount({:?}) * (current_block({:?}) - last_acum_weight_update({:?}) = latest_acum_weight(source_vote_weight) {:?}",
-            source.last_acum_weight(),
-            source.amount(),
-            current_block,
-            source.last_acum_weight_update(),
-            source_vote_weight
-        );
-
-        if source_vote_weight == 0 {
-            return Err("the vote weight of claimer is zero.");
-        }
-
-        let target_vote_weight = target.latest_acum_weight(current_block);
-
-        trace!(
-            target: "claim",
-            "[generic_claim] [target info] last_acum_weight({:?}) + amount({:?}) * (current_block({:?}) - last_acum_weight_update({:?}) = latest_acum_weight(source_vote_weight) {:?}",
-            target.last_acum_weight(),
-            target.amount(),
-            current_block,
-            target.last_acum_weight_update(),
-            target_vote_weight
-        );
-
-        let total_jackpot: u64 = xassets::Module::<T>::pcx_free_balance(target_jackpot_addr).as_();
-
-        // source_vote_weight * total_jackpot could overflow.
-        let dividend = match (source_vote_weight as u128).checked_mul(total_jackpot as u128) {
-            Some(x) => T::Balance::sa((x / target_vote_weight as u128) as u64),
-            None => {
-                error!(
-                    "[generic_claim] source_vote_weight * total_jackpot overflow, source_vote_weight: {:?}, total_jackpot: {:?}",
-                    source_vote_weight, total_jackpot
-                );
-                panic!("source_vote_weight * total_jackpot overflow")
-            }
-        };
-
-        trace!(target: "claim", "[generic_claim] total_jackpot: {:?}, dividend: {:?}", total_jackpot, dividend);
-
-        match claim_type {
-            ClaimType::Intention => {
-                xassets::Module::<T>::pcx_move_free_balance(target_jackpot_addr, who, dividend)
-                    .map_err(|e| {
-                        error!(
-                            "[generic_claim] fail to move {:?} from jackpot_addr to some nominator, current jackpot_balance: {:?}",
-                            dividend,
-                            xassets::Module::<T>::pcx_free_balance(target_jackpot_addr),
-                        );
-                        e.info()
-                    })?;
-            }
-            ClaimType::PseduIntention(token) => {
-                let channel_or_council = Self::channel_or_council_of(who, &token);
-                // 10% claim distributes to the channel of depositor.
-                let to_channel_or_council = T::Balance::sa(dividend.as_() / 10);
-
-                trace!(
-                    target: "claim",
-                    "[before moving to channel_or_council] should move {:?} from the jackpot to channel_or_council, current jackpot_balance: {:?}",
-                    to_channel_or_council,
-                    xassets::Module::<T>::pcx_free_balance(target_jackpot_addr)
-                );
-
-                xassets::Module::<T>::pcx_move_free_balance(
-                    target_jackpot_addr,
-                    &channel_or_council,
-                    to_channel_or_council,
-                )
-                    .map_err(|e| {
-                        error!(
-                            "[generic_claim] [deposite_claim] fail to move {:?} from jackpot_addr to channel_or_council, current jackpot_balance: {:?}",
-                            to_channel_or_council,
-                            xassets::Module::<T>::pcx_free_balance(target_jackpot_addr)
-                        );
-                        e.info()
-                    })?;
-
-                trace!(target: "claim", "[after moving to channel_or_council] jackpot_balance: {:?}", xassets::Module::<T>::pcx_free_balance(target_jackpot_addr));
-
-                trace!(
-                    target: "claim",
-                    "[before moving to depositor] should move {:?} from jackpot to depositor, current jackpot_balance: {:?}",
-                    dividend - to_channel_or_council,
-                    xassets::Module::<T>::pcx_free_balance(target_jackpot_addr)
-                );
-
-                xassets::Module::<T>::pcx_move_free_balance(
-                    target_jackpot_addr,
-                    who,
-                    dividend - to_channel_or_council,
-                )
-                    .map_err(|e| {
-                        error!(
-                            "[generic_claim] [deposite_claim] fail to move {:?} from jackpot_addr to some depositor, current jackpot_balance: {:?}",
-                            dividend - to_channel_or_council,
-                            xassets::Module::<T>::pcx_free_balance(target_jackpot_addr),
-                        );
-                        e.info()
-                    })?;
-
-                trace!(target: "claim", "[after moving to depositor] jackpot_balance: {:?}", xassets::Module::<T>::pcx_free_balance(target_jackpot_addr));
-            }
-        }
-
-        source.set_last_acum_weight(0);
-        source.set_last_acum_weight_update(current_block);
-
-        target.set_last_acum_weight(target_vote_weight - source_vote_weight);
-        target.set_last_acum_weight_update(current_block);
-
-        Ok((source_vote_weight, target_vote_weight, dividend))
-    }
-
-    /// This is for updating the vote weight of depositors, the delta changes is handled by assets module.
-    pub fn update_bare_vote_weight_both_way<
-        U: VoteWeight<T::BlockNumber>,
-        V: VoteWeight<T::BlockNumber>,
-    >(
-        source: &mut U,
-        target: &mut V,
+        target: &T::AccountId,
+        new_target_vote_weight: u128,
+        current_block: T::BlockNumber,
     ) {
-        // Update to the latest vote weight
-        Self::generic_update_vote_weight(source);
-        Self::generic_update_vote_weight(target);
-    }
-
-    pub fn update_vote_weight_both_way<
-        U: VoteWeight<T::BlockNumber>,
-        V: VoteWeight<T::BlockNumber>,
-    >(
-        source: &mut U,
-        target: &mut V,
-        value: u64,
-        to_add: bool,
-    ) {
-        // Update to the latest vote weight
-        Self::generic_update_vote_weight(source);
-        Self::generic_update_vote_weight(target);
-        // Update the nomination balance
-        Self::generic_apply_delta(source, value, to_add);
-        Self::generic_apply_delta(target, value, to_add);
+        Self::apply_update_staker_vote_weight(who, target, 0, current_block, &Delta::Zero);
+        Self::apply_update_intention_vote_weight(
+            target,
+            new_target_vote_weight,
+            current_block,
+            &Delta::Zero,
+        );
     }
 }

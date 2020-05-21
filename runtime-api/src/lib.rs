@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+use rstd::collections::btree_map::BTreeMap;
 use rstd::prelude::Vec;
 use sr_primitives::traits::AuthorityIdFor;
 
@@ -13,7 +14,8 @@ pub mod xassets_api {
     use super::*;
     use rstd::collections::btree_map::BTreeMap;
     use xassets::{Asset, AssetType, Memo, Token};
-    use xrecords::AddrStr;
+    use xprocess::WithdrawalLimit;
+    use xr_primitives::AddrStr;
 
     decl_runtime_apis! {
         pub trait XAssetsApi {
@@ -23,7 +25,7 @@ pub mod xassets_api {
             fn withdrawal_list_of(chain: xassets::Chain) -> Vec<xrecords::RecordInfo<AccountIdForApi, Balance, BlockNumber, Timestamp>>;
             fn deposit_list_of(chain: xassets::Chain) -> Vec<xrecords::RecordInfo<AccountIdForApi, Balance, BlockNumber, Timestamp>>;
             fn verify_address(token: Token, addr: AddrStr, ext: Memo) -> Result<(), Vec<u8>>;
-            fn minimal_withdrawal_value(token: Token) -> Option<Balance>;
+            fn withdrawal_limit(token: Token) -> Option<WithdrawalLimit<Balance>>;
         }
     }
 }
@@ -34,10 +36,10 @@ pub mod xmining_api {
 
     decl_runtime_apis! {
         pub trait XMiningApi {
-            fn jackpot_accountid_for(who: AccountIdForApi) -> AccountIdForApi;
-            fn multi_jackpot_accountid_for(who: Vec<AccountIdForApi>) -> Vec<AccountIdForApi>;
-            fn token_jackpot_accountid_for(token: Token) -> AccountIdForApi;
-            fn multi_token_jackpot_accountid_for(token: Vec<Token>) -> Vec<AccountIdForApi>;
+            fn jackpot_accountid_for_unsafe(who: AccountIdForApi) -> AccountIdForApi;
+            fn multi_jackpot_accountid_for_unsafe(who: Vec<AccountIdForApi>) -> Vec<AccountIdForApi>;
+            fn token_jackpot_accountid_for_unsafe(token: Token) -> AccountIdForApi;
+            fn multi_token_jackpot_accountid_for_unsafe(token: Vec<Token>) -> Vec<AccountIdForApi>;
             fn asset_power(token: Token) -> Option<Balance>;
         }
     }
@@ -60,6 +62,8 @@ pub mod xfee_api {
     decl_runtime_apis! {
         pub trait XFeeApi {
             fn transaction_fee(call: Vec<u8>, encoded_len: u64) -> Option<u64>;
+
+            fn fee_weight_map() -> BTreeMap<Vec<u8>, u64>;
         }
     }
 }
@@ -74,13 +78,71 @@ pub mod xsession_api {
     }
 }
 
+pub mod xstaking_api {
+    use super::*;
+
+    decl_runtime_apis! {
+        pub trait XStakingApi {
+            fn intention_set() -> Vec<AccountIdForApi>;
+            // T::SessionKey should use AuthorityId here and ChainX is able to compile, but the tool depdendent on ChainX fails to compile when using AuthorityId.
+            // 2019-05-25: Compile ERROR: the return type of a function must have a statically known size
+            // 2019-07-15 ChainX is able compile, but the tool depdendent on ChainX is unable to compile.
+            fn intentions_info_common() -> Vec<xstaking::IntentionInfoCommon<AccountIdForApi, Balance, AccountIdForApi, BlockNumber>>;
+            fn intention_info_common_of(intention: &AccountIdForApi) -> Option<xstaking::IntentionInfoCommon<AccountIdForApi, Balance, AccountIdForApi, BlockNumber>>;
+        }
+    }
+}
+
 pub mod xbridge_api {
     use super::*;
-    use xbitcoin::TrusteeAddrInfo;
+    use xassets::Chain;
+    use xbridge_common::types::{GenericAllSessionInfo, GenericTrusteeIntentionProps};
     decl_runtime_apis! {
         pub trait XBridgeApi {
-            /// generate a mock trustee info, result is (Vec<(accountid, (hot pubkey, cold pubkey)), (required count, total count), hot_trustee_addr, cold_trustee_addr)>)
-            fn mock_bitcoin_new_trustees(candidates: Vec<AccountIdForApi>) -> Result<(Vec<(AccountIdForApi, (Vec<u8>, Vec<u8>))>, (u32, u32), TrusteeAddrInfo, TrusteeAddrInfo), Vec<u8>>;
+            /// generate a mock trustee info
+            fn mock_new_trustees(chain: Chain, candidates: Vec<AccountIdForApi>) -> Result<GenericAllSessionInfo<AccountIdForApi>, Vec<u8>>;
+
+            fn trustee_props_for(who: AccountIdForApi) ->  BTreeMap<xassets::Chain, GenericTrusteeIntentionProps>;
+
+            fn trustee_session_info() -> BTreeMap<xassets::Chain, GenericAllSessionInfo<AccountIdForApi>>;
+
+            fn trustee_session_info_for(chain: Chain, number: Option<u32>) -> Option<(u32, GenericAllSessionInfo<AccountIdForApi>)>;
+        }
+    }
+}
+
+pub mod xcontracts_api {
+    use super::*;
+    use xassets::Token;
+    use xr_primitives::{ContractExecResult, GetStorageResult, XRC20Selector};
+
+    decl_runtime_apis! {
+        /// The API to interact with contracts without using executive.
+        pub trait XContractsApi {
+            /// Perform a call from a specified account to a given contract.
+            ///
+            /// See the contracts' `call` dispatchable function for more details.
+            fn call(
+                origin: AccountIdForApi,
+                dest: AccountIdForApi,
+                value: Balance,
+                gas_limit: u64,
+                input_data: Vec<u8>,
+            ) -> ContractExecResult;
+
+            /// Query a given storage key in a given contract.
+            ///
+            /// Returns `Ok(Some(Vec<u8>))` if the storage value exists under the given key in the
+            /// specified account and `Ok(None)` if it doesn't. If the account specified by the address
+            /// doesn't exist, or doesn't have a contract or if the contract is a tombstone, then `Err`
+            /// is returned.
+            fn get_storage(address: AccountIdForApi, key: [u8; 32]) -> GetStorageResult;
+
+            fn xrc20_call(
+                token: Token,
+                selector: XRC20Selector,
+                data: Vec<u8>,
+            ) -> ContractExecResult;
         }
     }
 }

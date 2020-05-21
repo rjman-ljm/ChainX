@@ -19,21 +19,23 @@
 
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
 
+use futures::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::{info, warn};
 
-use consensus::{import_queue, start_aura, AuraImportQueue, NothingExtra, SlotDuration};
+use client::LongestChain;
+use consensus::{import_queue, start_aura, AuraImportQueue, SlotDuration};
+use grandpa::{self, FinalityProofProvider as GrandpaFinalityProofProvider};
 use inherents::InherentDataProviders;
 use network::construct_simple_protocol;
 use sr_primitives::generic::BlockId;
 use sr_primitives::traits::ProvideRuntimeApi;
 use substrate_primitives::{ed25519, Pair as PairT};
 use substrate_service::{
-    construct_service_factory, FactoryFullConfiguration, FullBackend, FullClient, FullComponents,
-    FullExecutor, LightBackend, LightClient, LightComponents, LightExecutor, TaskExecutor,
-    TelemetryOnConnect,
+    construct_service_factory, error::Error as ServiceError, FactoryFullConfiguration, FullBackend,
+    FullClient, FullComponents, FullExecutor, LightBackend, LightClient, LightComponents,
+    LightExecutor, TaskExecutor,
 };
 use transaction_pool::txpool::Pool as TransactionPool;
 
@@ -103,20 +105,18 @@ construct_service_factory! {
                 let (block_import, link_half) = service.config.custom.grandpa_import_setup.take()
                     .expect("Link Half and Block Import are present for Full Services or setup failed before. qed");
 
-                if let Some(ref key) = local_key {
+                if let Some(ref key) = local_key {  //--key
                     info!("Using authority key {:?}", key.public());
                     let proposer = Arc::new(substrate_basic_authorship::ProposerFactory {
                         client: service.client(),
                         transaction_pool: service.transaction_pool(),
-                        inherents_pool: service.inherents_pool(),
                     });
 
                     let client = service.client();
                     let accountid_from_localkey: AccountId = key.public();
-                    info!("Using authority key: {:?}, accountid is: {:?}", key.public(), accountid_from_localkey);
                     // use validator name to get accountid and sessionkey from runtime storage
                     let name = get_validator_name().expect("must get validator name is AUTHORITY mode");
-                    let best_hash = client.info()?.chain.best_hash;
+                    let best_hash = client.info().chain.best_hash;
                     let ret = client
                         .runtime_api()
                         .pubkeys_for_validator_name(&BlockId::Hash(best_hash), name.as_bytes().to_vec())
@@ -147,19 +147,23 @@ construct_service_factory! {
                         .register_provider(XSystemInherentDataProvider::new(name.as_bytes().to_vec())).expect("blockproducer set err; qed");
 
                     let client = service.client();
-                    executor.spawn(start_aura(
+                    let select_chain = service.select_chain()
+                        .ok_or(ServiceError::SelectChainRequired)?;
+
+                    let aura = start_aura(
                         SlotDuration::get_or_compute(&*client)?,
                         key.clone(),
                         client,
+                        select_chain,
                         block_import.clone(),
                         proposer,
                         service.network(),
-                        service.on_exit(),
                         service.config.custom.inherent_data_providers.clone(),
                         service.config.force_authoring,
-                    )?);
+                    )?;
+                    executor.spawn(aura.select(service.on_exit()).then(|_| Ok(())));
 
-                    info!("Running Grandpa session as Authority {}", key.public());
+                    info!("Running Grandpa session as Authority {:?}", key.public());
                 }
 
                 let local_key = if service.config.disable_grandpa {
@@ -167,6 +171,7 @@ construct_service_factory! {
                 } else {
                     local_key
                 };
+/*
                 let config = grandpa::Config {
                     local_key,
                     // FIXME #1578 make this available through chainspec
@@ -174,6 +179,13 @@ construct_service_factory! {
                     justification_period: 4096,
                     name: Some(service.config.name.clone())
                 };
+
+                executor.spawn(grandpa::run_grandpa_observer(
+                    config,
+                    link_half,
+                    service.network(),
+                    service.on_exit(),
+                )?);
 
                 match config.local_key {
                     None => {
@@ -201,6 +213,7 @@ construct_service_factory! {
                         executor.spawn(grandpa::run_grandpa_voter(grandpa_config)?);
                     },
                 }
+*/
 
                 Ok(service)
             }
@@ -208,38 +221,60 @@ construct_service_factory! {
         LightService = LightComponents<Self>
             { |config, executor| <LightComponents<Factory>>::new(config, executor) },
         FullImportQueue = AuraImportQueue<Self::Block>
-            { |config: &mut FactoryFullConfiguration<Self> , client: Arc<FullClient<Self>>| {
+            { |config: &mut FactoryFullConfiguration<Self> , client: Arc<FullClient<Self>>, select_chain: Self::SelectChain| {
                 let slot_duration = SlotDuration::get_or_compute(&*client)?;
                 let (block_import, link_half) =
-                    grandpa::block_import::<_, _, _, RuntimeApi, FullClient<Self>>(
-                        client.clone(), client.clone()
+                    grandpa::block_import::<_, _, _, RuntimeApi, FullClient<Self>, _>(
+                        client.clone(), client.clone(), select_chain
                     )?;
                 let block_import = Arc::new(block_import);
                 let justification_import = block_import.clone();
 
                 config.custom.grandpa_import_setup = Some((block_import.clone(), link_half));
 
-                import_queue::<_, _, _, ed25519::Pair>(
+                import_queue::<_, _, ed25519::Pair>(
                     slot_duration,
                     block_import,
                     Some(justification_import),
+                    None,
+                    None,
                     client,
-                    NothingExtra,
                     config.custom.inherent_data_providers.clone(),
                 ).map_err(Into::into)
             }},
         LightImportQueue = AuraImportQueue<Self::Block>
-        { |config: &FactoryFullConfiguration<Self>, client: Arc<LightClient<Self>>| {
-            import_queue::<_, _, _, ed25519::Pair>(
-                            SlotDuration::get_or_compute(&*client)?,
-                            client.clone(),
-                            None,
-                            client,
-                            NothingExtra,
-                            config.custom.inherent_data_providers.clone(),
-                        ).map_err(Into::into)
-                    }
-                },
+            { |config: &FactoryFullConfiguration<Self>, client: Arc<LightClient<Self>>| {
+                #[allow(deprecated)]
+                let fetch_checker = client.backend().blockchain().fetcher()
+                    .upgrade()
+                    .map(|fetcher| fetcher.checker().clone())
+                    .ok_or_else(|| "Trying to start light import queue without active fetch checker")?;
+                let block_import = grandpa::light_block_import::<_, _, _, RuntimeApi, LightClient<Self>>(
+                    client.clone(), Arc::new(fetch_checker), client.clone()
+                )?;
+                let block_import = Arc::new(block_import);
+                let finality_proof_import = block_import.clone();
+                let finality_proof_request_builder = finality_proof_import.create_finality_proof_request_builder();
+
+                import_queue::<_, _, ed25519::Pair>(
+                    SlotDuration::get_or_compute(&*client)?,
+                    block_import,
+                    None,
+                    Some(finality_proof_import),
+                    Some(finality_proof_request_builder),
+                    client,
+                    config.custom.inherent_data_providers.clone(),
+                ).map_err(Into::into)
+            }},
+        SelectChain = LongestChain<FullBackend<Self>, Self::Block>
+            { |config: &FactoryFullConfiguration<Self>, client: Arc<FullClient<Self>>| {
+                #[allow(deprecated)]
+                Ok(LongestChain::new(client.backend().clone()))
+            }
+        },
+        FinalityProofProvider = { |client: Arc<FullClient<Self>>| {
+            Ok(Some(Arc::new(GrandpaFinalityProofProvider::new(client.clone(), client)) as _))
+        }},
     }
 }
 
@@ -306,5 +341,4 @@ mod tests {
             extrinsic_factory,
         );
     }
-
 }

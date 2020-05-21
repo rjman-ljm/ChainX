@@ -12,7 +12,7 @@ pub mod types;
 use inherents::{InherentData, InherentIdentifier, MakeFatalError, ProvideInherent, RuntimeString};
 use rstd::{prelude::Vec, result};
 use support::{decl_module, decl_storage, dispatch::Result, StorageValue};
-use system::ensure_inherent;
+use system::ensure_none;
 
 // ChainX
 #[cfg(feature = "std")]
@@ -21,7 +21,10 @@ use xsupport::{error, info};
 
 #[cfg(feature = "std")]
 pub use self::types::InherentDataProvider;
-pub use self::types::InherentError;
+pub use self::types::{InherentError, NetworkType};
+
+/// 44 for Mainnet, 42 for Testnet
+pub type AddressType = u32;
 
 pub const INHERENT_IDENTIFIER: InherentIdentifier = *b"producer";
 
@@ -42,7 +45,7 @@ pub trait Validator<AccountId> {
 decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
         fn set_block_producer(origin, producer: T::AccountId) -> Result {
-            ensure_inherent(origin)?;
+            ensure_none(origin)?;
             info!("height:{:}, blockproducer: {:?}|name:{:}", system::Module::<T>::block_number(), producer, u8array_to_string(&T::Validator::get_validator_name(&producer).unwrap_or_default()));
 
             if Self::is_validator(&producer) == false {
@@ -62,6 +65,8 @@ decl_module! {
 decl_storage! {
     trait Store for Module<T: Trait> as XSystem {
         pub BlockProducer get(block_producer): Option<T::AccountId>;
+
+        pub NetworkProps get(network_props) config(): (NetworkType, AddressType);
     }
 }
 
@@ -69,6 +74,10 @@ impl<T: Trait> Module<T> {
     fn is_validator(producer: &T::AccountId) -> bool {
         let validators = T::ValidatorList::validator_list();
         validators.contains(&producer)
+    }
+
+    pub fn address_type() -> u8 {
+        Self::network_props().1 as u8
     }
 }
 
@@ -93,7 +102,7 @@ impl<T: Trait> ProvideInherent for Module<T> {
 
         if !Self::is_validator(&producer) {
             error!(
-                "[create_inherent] producer_name:{:?}, producer:{:} not in current validators!, validators is:{:?}",
+                "[create_inherent] producer_name:{:?}, producer:{:?} not in current validators!, validators is:{:?}",
                 std::str::from_utf8(&producer_name).unwrap_or(&format!("{:?}", producer_name)),
                 producer,
                 T::ValidatorList::validator_list()
@@ -112,7 +121,7 @@ impl<T: Trait> ProvideInherent for Module<T> {
 
         if !Self::is_validator(&producer) {
             error!(
-                "[check_inherent] producer:{:} not in current validators!, validators is:{:?}",
+                "[check_inherent] producer:{:?} not in current validators!, validators is:{:?}",
                 producer,
                 T::ValidatorList::validator_list()
             );

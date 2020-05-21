@@ -134,7 +134,7 @@ impl<T: Trait> Module<T> {
 
         #[cfg(feature = "std")]
         let end = Local::now().timestamp_millis();
-        debug!("[match order] elasped time: {:}", end - begin);
+        debug!("[match order] elasped time: {:}ms", end - begin);
 
         // Remove the full filled order, otherwise the quotations, order status and handicap
         // should be updated.
@@ -157,22 +157,25 @@ impl<T: Trait> Module<T> {
         }
     }
 
-    fn apply_match_order_given_opponent_price(
+    fn apply_match_order_given_counterparty(
         taker_order: &mut OrderInfo<T>,
         pair: &TradingPair,
-        opponent_price: T::Price,
-        opponent_side: Side,
+        counterparty_price: T::Price,
+        counterparty_side: Side,
     ) {
-        let quotations = <QuotationsOf<T>>::get(&(pair.index, opponent_price));
+        let quotations = <QuotationsOf<T>>::get(&(pair.index, counterparty_price));
+        let mut fulfilled_orders = Vec::new();
+
         for quotation in quotations.iter() {
             if taker_order.is_fulfilled() {
-                return;
+                break;
             }
             // Find the matched order.
             if let Some(mut maker_order) = <OrderInfoOf<T>>::get(quotation) {
-                if opponent_side != maker_order.side() {
-                    panic!("opponent side error");
-                }
+                assert!(
+                    counterparty_side == maker_order.side(),
+                    "Opponent side should match the side of maker order."
+                );
 
                 let turnover = cmp::min(
                     taker_order.remaining_in_base(),
@@ -184,27 +187,22 @@ impl<T: Trait> Module<T> {
                     pair.index,
                     &mut maker_order,
                     taker_order,
-                    opponent_price,
+                    counterparty_price,
                     turnover,
                 );
 
                 // Remove maker_order if it has been full filled.
                 if maker_order.is_fulfilled() {
-                    <OrderInfoOf<T>>::remove(&(maker_order.submitter(), maker_order.index()));
-
-                    Self::remove_quotation(
-                        pair.index,
-                        opponent_price,
-                        maker_order.submitter(),
-                        maker_order.index(),
-                    );
-
-                    Self::update_handicap(&pair, opponent_price, maker_order.side());
+                    fulfilled_orders.push((maker_order.submitter(), maker_order.index()));
+                    Self::update_handicap(&pair, counterparty_price, maker_order.side());
                 }
 
-                Self::update_latest_and_average_price(pair.index, opponent_price);
+                Self::update_latest_and_average_price(pair.index, counterparty_price);
             }
         }
+
+        // Remove the fulfilled orders as well as the quotations.
+        Self::remove_orders_and_quotations(pair.index, counterparty_price, fulfilled_orders);
     }
 
     fn apply_match_order(
@@ -222,39 +220,39 @@ impl<T: Trait> Module<T> {
         // FIXME refine later
         match taker_order.side() {
             Buy => {
-                let (opponent_side, floor, ceiling) = (Sell, lowest_offer, my_quote);
+                let (counterparty_side, floor, ceiling) = (Sell, lowest_offer, my_quote);
 
-                let mut opponent_price = floor;
+                let mut counterparty_price = floor;
 
-                while !opponent_price.is_zero() && opponent_price <= ceiling {
+                while !counterparty_price.is_zero() && counterparty_price <= ceiling {
                     if taker_order.is_fulfilled() {
                         return;
                     }
-                    Self::apply_match_order_given_opponent_price(
+                    Self::apply_match_order_given_counterparty(
                         taker_order,
                         pair,
-                        opponent_price,
-                        opponent_side,
+                        counterparty_price,
+                        counterparty_side,
                     );
-                    opponent_price = Self::tick_up(opponent_price, tick);
+                    counterparty_price = Self::tick_up(counterparty_price, tick);
                 }
             }
             Sell => {
-                let (opponent_side, floor, ceiling) = (Buy, my_quote, highest_bid);
+                let (counterparty_side, floor, ceiling) = (Buy, my_quote, highest_bid);
 
-                let mut opponent_price = ceiling;
+                let mut counterparty_price = ceiling;
 
-                while !opponent_price.is_zero() && opponent_price >= floor {
+                while !counterparty_price.is_zero() && counterparty_price >= floor {
                     if taker_order.is_fulfilled() {
                         return;
                     }
-                    Self::apply_match_order_given_opponent_price(
+                    Self::apply_match_order_given_counterparty(
                         taker_order,
                         pair,
-                        opponent_price,
-                        opponent_side,
+                        counterparty_price,
+                        counterparty_side,
                     );
-                    opponent_price = Self::tick_down(opponent_price, tick);
+                    counterparty_price = Self::tick_down(counterparty_price, tick);
                 }
             }
         }
@@ -269,22 +267,24 @@ impl<T: Trait> Module<T> {
         pair: TradingPair,
         order_side: Side,
     ) {
-        <OrderInfoOf<T>>::remove(&(who.clone(), order_index));
+        let order_key = (who, order_index);
 
-        Self::remove_quotation(pair_index, price, who, order_index);
+        <OrderInfoOf<T>>::remove(&order_key);
+        Self::remove_quotation(pair_index, price, order_key);
 
         Self::update_handicap(&pair, price, order_side);
     }
 
+    /// Update the status of order after the turnover is calculated.
     fn update_order_on_execute(
         order: &mut OrderInfo<T>,
-        amount: &T::Balance,
+        turnover: &T::Balance,
         trade_history_index: TradeHistoryIndex,
     ) {
         order.executed_indices.push(trade_history_index);
 
         // Unwrap or default?
-        order.already_filled = match order.already_filled.checked_add(amount) {
+        order.already_filled = match order.already_filled.checked_add(turnover) {
             Some(x) => x,
             None => panic!("add order.already_filled overflow"),
         };
@@ -304,9 +304,19 @@ impl<T: Trait> Module<T> {
         <OrderInfoOf<T>>::insert(&(order.submitter(), order.index()), order);
     }
 
+    /// Due to the loss of precision in Self::convert_base_to_quote(),
+    /// the remaining could still be non-zero when the order is full filled, which must be refunded.
+    fn try_refund_remaining(order: &mut OrderInfo<T>, token: &Token) {
+        if order.is_fulfilled() && !order.remaining.is_zero() {
+            Self::refund_reserved_dex_spot(&order.submitter(), token, order.remaining);
+            order.remaining = Zero::zero();
+        }
+    }
+
     /// 1. update the taker and maker order based on the turnover
     /// 2. delivery asset to each other
-    /// 3. update the remaining of orders
+    /// 3. update the remaining field of orders
+    /// 4. try refunding the non-zero remaining asset if order is fulfilled
     fn execute_order(
         pair_index: TradingPairIndex,
         maker_order: &mut OrderInfo<T>,
@@ -314,7 +324,7 @@ impl<T: Trait> Module<T> {
         price: T::Price,
         turnover: T::Balance,
     ) -> Result {
-        let pair = Self::trading_pair(&pair_index)?;
+        let pair = Self::trading_pair(pair_index)?;
 
         let trade_history_index = Self::trade_history_index_of(pair_index);
         <TradeHistoryIndexOf<T>>::insert(pair_index, trade_history_index + 1);
@@ -334,6 +344,14 @@ impl<T: Trait> Module<T> {
         maker_order.decrease_remaining_on_execute(maker_turnover_amount);
         taker_order.decrease_remaining_on_execute(taker_turnover_amount);
 
+        let refunding_token_type = |order: &OrderInfo<T>| match order.side() {
+            Buy => pair.quote(),
+            Sell => pair.base(),
+        };
+
+        Self::try_refund_remaining(maker_order, &refunding_token_type(maker_order));
+        Self::try_refund_remaining(taker_order, &refunding_token_type(taker_order));
+
         Self::insert_refreshed_order(maker_order);
         Self::insert_refreshed_order(taker_order);
 
@@ -348,7 +366,7 @@ impl<T: Trait> Module<T> {
             maker_order.index(),
             taker_order.index(),
             turnover,
-            <system::Module<T>>::block_number().as_(),
+            <system::Module<T>>::block_number().saturated_into::<u64>(),
         ));
 
         Ok(())

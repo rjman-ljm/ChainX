@@ -5,6 +5,7 @@
 use super::*;
 
 // Substrate
+use parity_codec::{Decode, Encode};
 use primitives::testing::{Digest, DigestItem, Header, UintAuthorityId};
 use primitives::traits::BlakeTwo256;
 use primitives::BuildStorage;
@@ -56,28 +57,45 @@ impl timestamp::Trait for Test {
 }
 
 impl xbitcoin::Trait for Test {
-    type AccountExtractor = DummyAccountExtractorForBitcoin;
+    type XBitcoinLockup = Self;
+    type AccountExtractor = DummyExtractor;
+    type TrusteeSessionProvider = XBridgeFeatures;
+    type TrusteeMultiSigProvider = DummyBitcoinTrusteeMultiSig;
+    type CrossChainProvider = XBridgeFeatures;
     type Event = ();
 }
 
-pub struct DummyAccountExtractorForBitcoin;
+pub struct DummyExtractor;
+impl xbridge_common::traits::Extractable<u64> for DummyExtractor {
+    fn account_info(_data: &[u8], _: u8) -> Option<(u64, Option<Vec<u8>>)> {
+        Some((999, None))
+    }
+}
 
-impl xr_primitives::traits::Extractable<u64> for DummyAccountExtractorForBitcoin {
-    fn account_info(data: &[u8]) -> Option<(u64, Vec<u8>)> {
-        None
+impl support::dispatch::Dispatchable for DummyLimitedCall {
+    type Origin = Origin;
+    type Trait = DummyLimitedCall;
+    fn dispatch(self, _origin: Origin) -> support::dispatch::Result {
+        Ok(())
     }
 }
 
 impl xaccounts::Trait for Test {
-    type Event = ();
     type DetermineIntentionJackpotAccountId = DummyDetermineIntentionJackpotAccountId;
 }
 
 pub struct DummyDetermineIntentionJackpotAccountId;
 impl xaccounts::IntentionJackpotAccountIdFor<u64> for DummyDetermineIntentionJackpotAccountId {
-    fn accountid_for(origin: &u64) -> u64 {
+    fn accountid_for_unsafe(origin: &u64) -> u64 {
         origin + 100
     }
+    fn accountid_for_safe(origin: &u64) -> Option<u64> {
+        Some(origin + 100)
+    }
+}
+
+impl xbridge_common::Trait for Test {
+    type Event = ();
 }
 
 impl xassets::Trait for Test {
@@ -86,6 +104,7 @@ impl xassets::Trait for Test {
     type OnNewAccount = Indices;
     type OnAssetChanged = ();
     type OnAssetRegisterOrRevoke = ();
+    type DetermineTokenJackpotAccountId = ();
 }
 
 impl xrecords::Trait for Test {
@@ -95,6 +114,16 @@ impl xrecords::Trait for Test {
 impl xsystem::Trait for Test {
     type ValidatorList = DummyDetermineValidatorList;
     type Validator = DummyDetermineValidator;
+}
+
+impl xsdot::Trait for Test {
+    type AccountExtractor = DummyExtractor;
+    type CrossChainProvider = XBridgeFeatures;
+    type Event = ();
+}
+
+impl xbitcoin::lockup::Trait for Test {
+    type Event = ();
 }
 
 pub struct DummyDetermineValidatorList;
@@ -110,6 +139,62 @@ impl xsystem::Validator<u64> for DummyDetermineValidator {
     }
     fn get_validator_name(_accountid: &u64) -> Option<Vec<u8>> {
         None
+    }
+}
+
+impl xbridge_features::Trait for Test {
+    type TrusteeMultiSig = DummyMultiSigIdFor;
+    type Event = ();
+}
+
+pub struct DummyBitcoinTrusteeMultiSig;
+impl xbridge_common::traits::TrusteeMultiSig<u64> for DummyBitcoinTrusteeMultiSig {
+    fn multisig_for_trustees() -> u64 {
+        777
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug)]
+pub struct DummyLimitedCall;
+impl xmultisig::LimitedCall<u64> for DummyLimitedCall {
+    fn allow(&self) -> bool {
+        true
+    }
+
+    fn exec(&self, _execiser: &u64) -> Result {
+        Ok(())
+    }
+}
+
+impl xmultisig::Trait for Test {
+    type MultiSig = DummyMultiSig;
+    type GenesisMultiSig = DummyGenesisMultiSig;
+    type Proposal = DummyLimitedCall;
+    type Event = ();
+}
+
+pub struct DummyMultiSig;
+impl xmultisig::MultiSigFor<u64, H256> for DummyMultiSig {
+    fn multi_sig_addr_for(who: &u64) -> u64 {
+        who + 2
+    }
+
+    fn multi_sig_id_for(_who: &u64, _addr: &u64, _data: &[u8]) -> H256 {
+        H256::default()
+    }
+}
+
+pub struct DummyGenesisMultiSig;
+impl xmultisig::GenesisMultiSig<u64> for DummyGenesisMultiSig {
+    fn gen_genesis_multisig() -> (u64, u64) {
+        (666, 888)
+    }
+}
+
+pub struct DummyMultiSigIdFor;
+impl xbridge_features::TrusteeMultiSigFor<u64> for DummyMultiSigIdFor {
+    fn multi_sig_addr_for_trustees(_chain: xassets::Chain, _who: &Vec<u64>) -> u64 {
+        1
     }
 }
 
@@ -239,3 +324,5 @@ pub fn new_test_ext() -> runtime_io::TestExternalities<Blake2Hasher> {
     let init: StorageOverlay = init.into();
     runtime_io::TestExternalities::new(init)
 }
+
+pub type XBridgeFeatures = xbridge_features::Module<Test>;

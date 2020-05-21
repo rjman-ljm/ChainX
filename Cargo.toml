@@ -1,6 +1,6 @@
 [package]
 name = "chainx"
-version = "0.9.9"
+version = "1.1.0"
 build = "build.rs"
 authors = ["Chainpool <https://www.chainx.org>"]
 edition = "2018"
@@ -10,15 +10,16 @@ name = "chainx"
 path = "src/main.rs"
 
 [dependencies]
-chainx-cli = { path = "./cli" }
 ctrlc = { version = "3.0", features = ["termination"] }
-error-chain = "0.12"
 futures = "0.1.17"
+serde_json = "1.0"
+chainx-cli = { path = "./cli" }
 
 [build-dependencies]
 vergen = "3"
 
 [features]
+msgbus-log = ["chainx-cli/msgbus-log"]
 msgbus-redis = ["chainx-cli/msgbus-redis"]
 msgbus-redis-keyhash = ["msgbus-redis", "chainx-cli/msgbus-redis-keyhash"]
 cache-lru = ["chainx-cli/cache-lru"]
@@ -35,6 +36,7 @@ members = [
     "xr-primitives",
     # ChainX runtime module libraries
     "xrml/xbootstrap",
+    "xrml/xfisher",
     "xrml/xsystem",
     "xrml/xsupport",
     "xrml/xaccounts",
@@ -49,6 +51,9 @@ members = [
     "xrml/xdex/spot",
     "xrml/xmining/staking",
     "xrml/xmining/tokens",
+    "xrml/xbridge/common",
     "xrml/xbridge/bitcoin",
     "xrml/xbridge/sdot",
+    "xrml/xbridge/features",
+    "xrml/xcontracts",
 ]

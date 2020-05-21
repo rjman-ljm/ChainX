@@ -1,14 +1,10 @@
 // Copyright 2018 Chainpool
-
+use crate::service;
+use log::warn;
+use rpc;
 use std::io;
 use std::net::SocketAddr;
-
-use log::warn;
-
-use rpc_servers as rpc;
 use substrate_service::{ComponentBlock, ComponentExHash, TaskExecutor};
-
-use super::service;
 
 fn maybe_start_server<T, F>(address: Option<SocketAddr>, start: F) -> Result<Option<T>, io::Error>
 where
@@ -69,6 +65,7 @@ impl Rpc for substrate_service::LightComponents<service::Factory> {
                 //should_have_peers,
                 false,
             );
+
             let chainx = rpc::apis::chainx::ChainX::new(client.clone());
             rpc::rpc_handler::<ComponentBlock<Self>, ComponentExHash<Self>, _, _, _, _, _>(
                 state, chain, author, system, chainx,
@@ -76,10 +73,18 @@ impl Rpc for substrate_service::LightComponents<service::Factory> {
         };
         let rpc_http: Result<Option<rpc::HttpServer>, io::Error> =
             maybe_start_server(config.rpc_http, |address| {
-                rpc::start_http(address, handler())
+                rpc::start_http(address, config.rpc_cors.as_ref(), handler())
             });
+
         let rpc_ws: Result<Option<rpc::WsServer>, io::Error> =
-            maybe_start_server(config.rpc_ws, |address| rpc::start_ws(address, handler()));
+            maybe_start_server(config.rpc_ws, |address| {
+                rpc::start_ws(
+                    address,
+                    config.rpc_ws_max_connections,
+                    config.rpc_cors.as_ref(),
+                    handler(),
+                )
+            });
         (rpc_http, rpc_ws)
     }
 }
@@ -116,17 +121,26 @@ impl Rpc for substrate_service::FullComponents<service::Factory> {
                 //should_have_peers,
                 false,
             );
-            let chainext = rpc::apis::chainx::ChainX::new(client.clone());
+
+            let chainx = rpc::apis::chainx::ChainX::new(client.clone());
             rpc::rpc_handler::<ComponentBlock<Self>, ComponentExHash<Self>, _, _, _, _, _>(
-                state, chain, author, system, chainext,
+                state, chain, author, system, chainx,
             )
         };
         let rpc_http: Result<Option<rpc::HttpServer>, io::Error> =
             maybe_start_server(config.rpc_http, |address| {
-                rpc::start_http(address, handler())
+                rpc::start_http(address, config.rpc_cors.as_ref(), handler())
             });
+
         let rpc_ws: Result<Option<rpc::WsServer>, io::Error> =
-            maybe_start_server(config.rpc_ws, |address| rpc::start_ws(address, handler()));
+            maybe_start_server(config.rpc_ws, |address| {
+                rpc::start_ws(
+                    address,
+                    config.rpc_ws_max_connections,
+                    config.rpc_cors.as_ref(),
+                    handler(),
+                )
+            });
         (rpc_http, rpc_ws)
     }
 }

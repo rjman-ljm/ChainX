@@ -8,7 +8,7 @@ pub mod storage;
 pub use support::fail;
 
 #[cfg(feature = "std")]
-pub use self::logger::{u8array_to_addr, u8array_to_hex, u8array_to_string};
+pub use self::logger::{try_hex_or_str, u8array_to_addr, u8array_to_hex, u8array_to_string};
 
 #[macro_export]
 macro_rules! ensure_with_errorlog {
@@ -27,10 +27,12 @@ macro_rules! ensure_with_errorlog {
 macro_rules! trustees {
     ( $( $x:expr )+ ) => {
         $($x)+.iter()
-            .map(|v|
-                 <xaccounts::IntentionNameOf<T>>::get(v)
-                 .map(|name| format!("{:?}({:})", v, u8array_to_string(&name)))
-                 .unwrap()
+            .map(|v| {
+                use xsupport::u8array_to_string;
+                <xaccounts::IntentionNameOf<T>>::get(v)
+                    .map(|name| format!("{:?}({:})", v, u8array_to_string(&name)))
+                    .unwrap()
+                }
             )
             .collect::<Vec<_>>()
     };
@@ -61,13 +63,15 @@ macro_rules! validators {
 #[macro_export]
 macro_rules! who {
     ( $( $x:ident )+ ) => {
-
-        <xaccounts::IntentionNameOf<T>>::get($($x)+)
-            .map(|name| {
-                use xsupport::u8array_to_string;
-                format!("{:?}({:})", $($x)+, u8array_to_string(&name))
-            })
-            .unwrap()
+        {
+            use std::borrow::Borrow;
+            <xaccounts::IntentionNameOf<T>>::get($($x.borrow())+)
+                .map(|name| {
+                    use xsupport::u8array_to_string;
+                    format!("{:?}({:})", $($x)+, u8array_to_string(&name))
+                })
+                .unwrap()
+        }
     };
 }
 

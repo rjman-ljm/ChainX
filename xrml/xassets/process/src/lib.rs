@@ -7,28 +7,40 @@
 mod mock;
 mod tests;
 
+use parity_codec::{Decode, Encode};
+#[cfg(feature = "std")]
+use serde_derive::{Deserialize, Serialize};
+
 // Substrate
-use primitives::traits::As;
 use rstd::prelude::Vec;
-use support::{decl_module, decl_storage, dispatch::Result};
+use support::{decl_module, decl_storage, dispatch::Result, StorageValue};
 use system::ensure_signed;
 
 // ChainX
 use xassets::{Chain, ChainT, Memo, Token};
-use xrecords::AddrStr;
+use xr_primitives::AddrStr;
 #[cfg(feature = "std")]
 use xsupport::token;
-use xsupport::warn;
+use xsupport::{debug, ensure_with_errorlog};
+
+#[derive(PartialEq, Eq, Clone, Encode, Decode, Default)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug))]
+#[cfg_attr(feature = "std", serde(rename_all = "camelCase"))]
+pub struct WithdrawalLimit<Balance> {
+    pub minimal_withdrawal: Balance,
+    pub fee: Balance,
+}
 
 pub trait Trait: xassets::Trait + xrecords::Trait + xbitcoin::Trait {}
 
 decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
         fn withdraw(origin, token: Token, value: T::Balance, addr: AddrStr, ext: Memo) -> Result {
-            runtime_io::print("[xassets process withdrawal] withdraw");
             let who = ensure_signed(origin)?;
 
-            Self::check_black_list(&token)?;
+            Self::can_withdraw(&token)?;
+
+            debug!("[withdraw]withdraw|who:{:?}|token:{:}|value:{:}", who, token!(token), value);
 
             let asset = xassets::Module::<T>::get_asset(&token)?;
             if asset.chain() == Chain::ChainX {
@@ -37,36 +49,51 @@ decl_module! {
 
             Self::verify_addr(&token, &addr, &ext)?;
 
-            let min = Self::minimal_withdrawal_value(&token).expect("all token should has minimal withdrawal value");
-            if value <= min {
+            let limit = Self::withdrawal_limit(&token).ok_or("token should has withdrawal limit")?;
+            // withdrawal value should larger than minimal_withdrawal, allow equal
+            if value < limit.minimal_withdrawal {
                 return Err("withdrawal value should larger than requirement")
             }
 
             xrecords::Module::<T>::withdrawal(&who, &token, value, addr, ext)?;
             Ok(())
         }
+
+        fn revoke_withdraw(origin, id: u32) -> Result {
+            let from = ensure_signed(origin)?;
+            xrecords::Module::<T>::withdrawal_revoke(&from, id)
+        }
+
+        pub fn modify_token_black_list(token :Token) {
+            TokenBlackList::<T>::mutate(|v| {
+                if v.contains(&token) {
+                    v.retain(|i| *i != token);
+                } else {
+                    v.push(token);
+                }
+            });
+        }
     }
 }
 
+// bugfix:
+// notice the old version is `Withdrawal`, it's a wrong naming.
+// we fix it to `XAssetsProcess`, and it would affect genesis init for `TokenBlackList`
 decl_storage! {
-    trait Store for Module<T: Trait> as Withdrawal {
+    trait Store for Module<T: Trait> as XAssetsProcess {
         TokenBlackList get(token_black_list) config(): Vec<Token>;
     }
 }
 
 impl<T: Trait> Module<T> {
-    fn check_black_list(token: &Token) -> Result {
-        let list = Self::token_black_list();
-        if list.contains(token) {
-            warn!(
-                "[check_black_list]|try asset:{:?}|current block list:{:?}",
-                token!(token),
-                list.into_iter()
-                    .map(|item| token!(item))
-                    .collect::<Vec<_>>()
-            );
-            return Err("this token is in blacklist");
-        }
+    #[inline]
+    fn can_withdraw(token: &Token) -> Result {
+        ensure_with_errorlog!(
+            xassets::Module::<T>::can_do(token, xassets::AssetLimit::CanWithdraw),
+            "this asset do not allow withdraw",
+            "token:{:}",
+            token!(token),
+        );
         Ok(())
     }
 
@@ -81,10 +108,15 @@ impl<T: Trait> Module<T> {
         Self::verify_addr(&token, &addr, &ext)
     }
 
-    pub fn minimal_withdrawal_value(token: &Token) -> Option<T::Balance> {
+    pub fn withdrawal_limit(token: &Token) -> Option<WithdrawalLimit<T::Balance>> {
         match token.as_slice() {
             <xbitcoin::Module<T> as ChainT>::TOKEN => {
-                Some(As::sa(xbitcoin::Module::<T>::btc_withdrawal_fee()))
+                let fee = xbitcoin::Module::<T>::btc_withdrawal_fee().into();
+                let limit = WithdrawalLimit::<T::Balance> {
+                    minimal_withdrawal: fee * 3.into() / 2.into(),
+                    fee,
+                };
+                Some(limit)
             }
             _ => None,
         }

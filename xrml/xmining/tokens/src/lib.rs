@@ -3,70 +3,45 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-mod mock;
+mod asset_power;
+pub mod cross_mining;
+mod impls;
+#[cfg(test)]
 mod tests;
 pub mod types;
+mod vote_weight;
 
-use parity_codec::Encode;
+use crate as xtokens;
 
 // Substrate
-use primitives::traits::{As, Hash};
+use primitives::traits::{SaturatedConversion, Zero};
 use rstd::{prelude::*, result};
-use substrate_primitives::crypto::UncheckedFrom;
 use support::{
-    decl_event, decl_module, decl_storage, dispatch::Result, ensure, StorageMap, StorageValue,
+    decl_event, decl_module, decl_storage, dispatch::Result, ensure, EnumerableStorageMap,
+    StorageMap, StorageValue,
 };
 
 // ChainX
-use xassets::{AssetErr, AssetType, ChainT, Token};
+use xassets::{AssetErr, AssetType, ChainT, Token, TokenJackpotAccountIdFor};
 use xassets::{OnAssetChanged, OnAssetRegisterOrRevoke};
-use xstaking::{ClaimType, OnReward, OnRewardCalculation, RewardHolder};
-use xsupport::{debug, error, info};
+use xstaking::{Claim, ComputeWeight};
+use xsupport::{debug, ensure_with_errorlog, info, warn};
 #[cfg(feature = "std")]
 use xsupport::{token, u8array_to_string};
 
-pub use self::types::{
-    DepositRecord, DepositVoteWeight, PseduIntentionProfs, PseduIntentionVoteWeight,
-};
+pub use self::types::*;
 
-pub trait Trait: xsystem::Trait + xstaking::Trait + xspot::Trait + xsdot::Trait {
-    type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
-
-    type DetermineTokenJackpotAccountId: TokenJackpotAccountIdFor<
-        Self::AccountId,
-        Self::BlockNumber,
-    >;
-}
-
-pub trait TokenJackpotAccountIdFor<AccountId: Sized, BlockNumber> {
-    fn accountid_for(token: &Token) -> AccountId;
-}
-
-pub struct SimpleAccountIdDeterminator<T: Trait>(::rstd::marker::PhantomData<T>);
-
-impl<T: Trait> TokenJackpotAccountIdFor<T::AccountId, T::BlockNumber>
-    for SimpleAccountIdDeterminator<T>
-where
-    T::AccountId: UncheckedFrom<T::Hash>,
-    T::BlockNumber: parity_codec::Codec,
+pub trait Trait:
+    xstaking::Trait + xspot::Trait + xbridge_features::Trait + xbitcoin::lockup::Trait
 {
-    fn accountid_for(token: &Token) -> T::AccountId {
-        let (_, _, init_number) =
-            xassets::Module::<T>::asset_info(token).expect("the asset must be existed before");
-        let token_hash = T::Hashing::hash(token);
-        let block_num_hash = T::Hashing::hash(init_number.encode().as_ref());
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(token_hash.as_ref());
-        buf.extend_from_slice(block_num_hash.as_ref());
-        UncheckedFrom::unchecked_from(T::Hashing::hash(&buf[..]))
-    }
+    type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
 
 decl_event!(
     pub enum Event<T> where <T as xassets::Trait>::Balance, <T as system::Trait>::AccountId {
         DepositorReward(AccountId, Token, Balance),
         DepositorClaim(AccountId, Token, u64, u64, Balance),
+        DepositorClaimV1(AccountId, Token, u128, u128, Balance),
     }
 );
 
@@ -81,22 +56,182 @@ decl_module! {
                 <xassets::Module<T> as ChainT>::TOKEN.to_vec() != token,
                 "Cannot claim from native asset via tokens module."
             );
-
             ensure!(
                 Self::psedu_intentions().contains(&token),
                 "Cannot claim from unsupport token."
             );
 
             debug!("[claim] who: {:?}, token: {:?}", who, token!(token));
-            Self::apply_claim(&who, &token)?;
+            <Self as Claim<T::AccountId, T::Balance>>::claim(&who, &token)?;
         }
 
+        /// Set the discount for converting the cross-chain asset to PCX based on the market value.
         fn set_token_discount(token: Token, value: u32) {
             ensure!(value <= 100, "TokenDiscount cannot exceed 100.");
             <TokenDiscount<T>>::insert(token, value);
         }
+
+        /// Set the reward for the newly issued cross-chain assets.
+        fn set_deposit_reward(value: T::Balance) {
+            DepositReward::<T>::put(value);
+        }
+
+        fn set_claim_restriction(token: Token, new: (u32, T::BlockNumber)) {
+            <ClaimRestrictionOf<T>>::insert(token, new);
+        }
+
+        fn set_deposit_record(
+            depositor: T::AccountId,
+            token: Token,
+            new_last_deposit_weight: Option<u64>,
+            new_last_deposit_weight_update: Option<T::BlockNumber>
+        ) {
+            let key = (depositor, token);
+            ensure!(
+                <DepositRecords<T>>::exists(&key),
+                "The DepositVoteWeight must already exist."
+            );
+            let old = <DepositRecords<T>>::get(&key);
+            let last_deposit_weight = new_last_deposit_weight.unwrap_or(old.last_deposit_weight);
+            let last_deposit_weight_update =
+                new_last_deposit_weight_update.unwrap_or(old.last_deposit_weight_update);
+            <DepositRecords<T>>::insert(
+                &key,
+                DepositVoteWeight {
+                    last_deposit_weight,
+                    last_deposit_weight_update,
+                },
+            );
+        }
+
+        fn set_deposit_record_v1(
+            depositor: T::AccountId,
+            token: Token,
+            new_last_deposit_weight: Option<u128>,
+            new_last_deposit_weight_update: Option<T::BlockNumber>
+        ) {
+            let key = (depositor, token);
+            if let Some(old) = <DepositRecordsV1<T>>::get(&key) {
+                let last_deposit_weight = new_last_deposit_weight.unwrap_or(old.last_deposit_weight);
+                let last_deposit_weight_update =
+                    new_last_deposit_weight_update.unwrap_or(old.last_deposit_weight_update);
+                <DepositRecordsV1<T>>::insert(
+                    &key,
+                    DepositVoteWeightV1 {
+                        last_deposit_weight,
+                        last_deposit_weight_update,
+                    },
+                );
+            } else {
+                return Err("The DepositVoteWeightV1 must already exist.");
+            }
+        }
+
+        fn set_psedu_intention_profs(
+            token: Token,
+            new_last_total_deposit_weight: Option<u64>,
+            new_last_total_deposit_weight_update: Option<T::BlockNumber>
+        ) {
+            ensure!(
+                <PseduIntentionProfiles<T>>::exists(&token),
+                "The PseduIntentionVoteWeight must already exist."
+            );
+            let old = <PseduIntentionProfiles<T>>::get(&token);
+            let last_total_deposit_weight =
+                new_last_total_deposit_weight.unwrap_or(old.last_total_deposit_weight);
+            let last_total_deposit_weight_update =
+                new_last_total_deposit_weight_update.unwrap_or(old.last_total_deposit_weight_update);
+            <PseduIntentionProfiles<T>>::insert(
+                &token,
+                PseduIntentionVoteWeight {
+                    last_total_deposit_weight,
+                    last_total_deposit_weight_update,
+                },
+            );
+        }
+
+        fn set_psedu_intention_profs_v1(
+            token: Token,
+            new_last_total_deposit_weight: Option<u128>,
+            new_last_total_deposit_weight_update: Option<T::BlockNumber>
+        ) {
+            if let Some(old) = <PseduIntentionProfilesV1<T>>::get(&token) {
+                let last_total_deposit_weight =
+                    new_last_total_deposit_weight.unwrap_or(old.last_total_deposit_weight);
+                let last_total_deposit_weight_update = new_last_total_deposit_weight_update
+                    .unwrap_or(old.last_total_deposit_weight_update);
+                <PseduIntentionProfilesV1<T>>::insert(
+                    &token,
+                    PseduIntentionVoteWeightV1 {
+                        last_total_deposit_weight,
+                        last_total_deposit_weight_update,
+                    },
+                );
+            } else {
+                return Err("The PseduIntentionVoteWeightV1 must already exist.");
+            }
+        }
+
+        /// Add/Update airdrop assets distribution ratio.
+        pub fn set_airdrop_distribution_ratio(token: Token, new_shares: u32) {
+            ensure!(xassets::AssetInfo::<T>::exists(&token), "Token does not exist!");
+            ensure!(new_shares > 0, "Shares of AirdropDistributionRatio can not be zero");
+
+            let old_shares = if <AirdropDistributionRatioMap<T>>::exists(&token) {
+                info!("[set_airdrop_distribution_ratio]Try updating airdrop asset {} distribution ratio to {}", u8array_to_string(&token), new_shares);
+                <AirdropDistributionRatioMap<T>>::get(&token)
+            } else {
+                info!("[set_airdrop_distribution_ratio]Try adding new airdrop asset {} with distribution ratio {}", u8array_to_string(&token), new_shares);
+                Default::default()
+            };
+
+            let old_sum: u32 = <AirdropDistributionRatioMap<T>>::enumerate().map(|(_, share)| share).sum();
+            let new_sum = old_sum + new_shares - old_shares;
+            ensure!(new_sum <= u32::max_value(), "sum of new_shares() can not exceed u32::max_value()");
+            <AirdropDistributionRatioMap<T>>::insert(&token, new_shares);
+
+        }
+
+        fn remove_airdrop_asset(token: Token) {
+            ensure!(xassets::AssetInfo::<T>::exists(&token), "Token does not exist!");
+
+            if <AirdropDistributionRatioMap<T>>::exists(&token) {
+                info!("[remove_airdrop_asset]Airdrop asset {} got removed", u8array_to_string(&token));
+                <AirdropDistributionRatioMap<T>>::remove(&token);
+            } else {
+                warn!("[remove_airdrop_asset]Skip removing airdrop asset {} as it does not exist!", u8array_to_string(&token));
+            }
+        }
+
+        /// Add/Update cross chain asset power.
+        pub fn set_fixed_cross_chain_asset_power_map(token: Token, new_power: u32) {
+            ensure!(xassets::AssetInfo::<T>::exists(&token), "Token does not exist!");
+            ensure!(new_power > 0, "Cross chain asset power can not be zero");
+
+            if <FixedCrossChainAssetPowerMap<T>>::exists(&token) {
+                info!("[set_fixed_cross_chain_asset_power_map]Update cross chain asset {} power to {}", u8array_to_string(&token), new_power);
+            } else {
+                info!("[set_fixed_cross_chain_asset_power_map]Add new cross chain asset {} with power {}", u8array_to_string(&token), new_power);
+            }
+
+            <FixedCrossChainAssetPowerMap<T>>::insert(&token, new_power);
+        }
+
+        fn remove_cross_chain_asset(token: Token) {
+            ensure!(xassets::AssetInfo::<T>::exists(&token), "Token does not exist!");
+
+            if <FixedCrossChainAssetPowerMap<T>>::exists(&token) {
+                info!("[remove_cross_chain_asset]Cross chain asset {} got removed", u8array_to_string(&token));
+                <FixedCrossChainAssetPowerMap<T>>::remove(&token);
+            } else {
+                warn!("[remove_cross_chain_asset]Skip removing cross chain asset {} as it does not exist!", u8array_to_string(&token));
+            }
+        }
     }
 }
+
+/// 302_400 blocks per week.
+pub const BLOCKS_PER_WEEK: u64 = 60 * 60 * 24 * 7 / 2;
 
 decl_storage! {
     trait Store for Module<T: Trait> as XTokens {
@@ -104,11 +239,31 @@ decl_storage! {
             config.token_discount.clone()
         }): map Token => u32;
 
+        /// Cross-chain assets that are able to participate in the assets mining.
         pub PseduIntentions get(psedu_intentions) : Vec<Token>;
+
+        pub ClaimRestrictionOf get(claim_restriction_of): map Token => (u32, T::BlockNumber) = (10u32, T::BlockNumber::saturated_from::<u64>(BLOCKS_PER_WEEK));
+
+        /// Block height of last claim for some cross miner per token.
+        pub LastClaimOf get(last_claim_of): map (T::AccountId, Token) => Option<T::BlockNumber>;
 
         pub PseduIntentionProfiles get(psedu_intention_profiles): map Token => PseduIntentionVoteWeight<T::BlockNumber>;
 
+        pub PseduIntentionProfilesV1 get(psedu_intention_profiles_v1): map Token => Option<PseduIntentionVoteWeightV1<T::BlockNumber>>;
+
         pub DepositRecords get(deposit_records): map (T::AccountId, Token) => DepositVoteWeight<T::BlockNumber>;
+
+        pub DepositRecordsV1 get(deposit_records_v1): map (T::AccountId, Token) => Option<DepositVoteWeightV1<T::BlockNumber>>;
+
+        /// when deposit success, reward some pcx to user for claiming. Default is 100000 = 0.001 PCX; 0.001*100000000
+        pub DepositReward get(deposit_reward): T::Balance = 100_000.into();
+
+        /// (SDOT, 1u32), (LBTC, 1u32) means SDOT:LBTC = 1:1
+        pub AirdropDistributionRatioMap get(airdrop_distribution_ratio_map): linked_map Token => u32;
+
+        /// (XBTC, 400u32)
+        pub FixedCrossChainAssetPowerMap get(fixed_cross_chain_asset_power_map): linked_map Token => u32;
+
     }
 
     add_extra_genesis {
@@ -116,367 +271,204 @@ decl_storage! {
     }
 }
 
-impl<T: Trait> OnAssetChanged<T::AccountId, T::Balance> for Module<T> {
-    fn on_move_before(
-        token: &Token,
-        from: &T::AccountId,
-        _: AssetType,
-        to: &T::AccountId,
-        _: AssetType,
-        _value: T::Balance,
-    ) {
-        // Exclude PCX and asset type changes on same account.
-        if <xassets::Module<T> as ChainT>::TOKEN.to_vec() == token.clone()
-            || from.clone() == to.clone()
-        {
-            return;
-        }
-
-        Self::try_init_receiver_vote_weight(to, token);
-
-        Self::update_depositor_vote_weight_only(from, token);
-        Self::update_depositor_vote_weight_only(to, token);
-    }
-
-    fn on_move(
-        _token: &Token,
-        _from: &T::AccountId,
-        _: AssetType,
-        _to: &T::AccountId,
-        _: AssetType,
-        _value: T::Balance,
-    ) -> result::Result<(), AssetErr> {
-        Ok(())
-    }
-
-    fn on_issue_before(target: &Token, source: &T::AccountId) {
-        // Exclude PCX
-        if <xassets::Module<T> as ChainT>::TOKEN.to_vec() == target.clone() {
-            return;
-        }
-
-        Self::try_init_receiver_vote_weight(source, target);
-
-        debug!(
-            "[on_issue_before] deposit_records: ({:?}, {:?}) = {:?}",
-            source,
-            token!(target),
-            Self::deposit_records((source.clone(), target.clone()))
-        );
-
-        Self::update_bare_vote_weight(source, target);
-    }
-
-    fn on_issue(target: &Token, source: &T::AccountId, value: T::Balance) -> Result {
-        // Exclude PCX
-        if <xassets::Module<T> as ChainT>::TOKEN.to_vec() == target.clone() {
-            return Ok(());
-        }
-
-        debug!(
-            "[on_issue] token: {:?}, who: {:?}, vlaue: {:?}",
-            u8array_to_string(target),
-            source,
-            value
-        );
-
-        Self::issue_reward(source, target, value)
-    }
-
-    fn on_destroy(target: &Token, source: &T::AccountId, _value: T::Balance) -> Result {
-        Self::update_bare_vote_weight(source, target);
-        Ok(())
-    }
-}
-
 impl<T: Trait> Module<T> {
-    fn apply_claim(who: &T::AccountId, token: &Token) -> Result {
-        let key = (who.clone(), token.clone());
-        let mut p_vote_weight = <PseduIntentionProfiles<T>>::get(token);
-        let mut d_vote_weight: DepositVoteWeight<T::BlockNumber> = Self::deposit_records(&key);
+    pub fn last_claim(who: &T::AccountId, token: &Token) -> Option<T::BlockNumber> {
+        Self::last_claim_of(&(who.clone(), token.clone()))
+    }
 
-        {
-            let mut prof = PseduIntentionProfs::<T> {
-                token,
-                staking: &mut p_vote_weight,
-            };
-            let addr = T::DetermineTokenJackpotAccountId::accountid_for(token);
+    /// This rule doesn't take effect if the interval is zero.
+    fn passed_enough_interval(
+        who: &T::AccountId,
+        token: &Token,
+        interval: T::BlockNumber,
+        current_block: T::BlockNumber,
+    ) -> Result {
+        if !interval.is_zero() {
+            if let Some(last_claim) = Self::last_claim(who, token) {
+                if current_block <= last_claim + interval {
+                    warn!("{:?} cannot claim until {:?}", who, last_claim + interval);
+                    return Err("Can only claim once per claim limiting period.");
+                }
+            }
+        }
+        Ok(())
+    }
 
-            let mut record = DepositRecord::<T> {
-                depositor: who,
-                token,
-                staking: &mut d_vote_weight,
-            };
+    /// This rule doesn't take effect if the staking requirement is zero.
+    fn contribute_enough_staking(
+        who: &T::AccountId,
+        dividend: T::Balance,
+        staking_requirement: u32,
+    ) -> Result {
+        if !staking_requirement.is_zero() {
+            let staked = <xassets::Module<T>>::pcx_type_balance(who, AssetType::ReservedStaking);
+            let staking_requirement: T::Balance = u64::from(staking_requirement).into();
+            if staked < staking_requirement * dividend {
+                warn!(
+                    "cannot claim due to the insufficient staking, current dividend: {:?}, current staking: {:?}, required staking: {:?}",
+                    dividend,
+                    staked,
+                    staking_requirement * dividend
+                );
+                return Err("Cannot claim if what you have staked is too little.");
+            }
+        }
+        Ok(())
+    }
 
-            let (source_vote_weight, target_vote_weight, dividend) =
-                <xstaking::Module<T>>::generic_claim(
-                    &mut record,
-                    who,
-                    &mut prof,
-                    &addr,
-                    ClaimType::PseduIntention(token.clone()),
-                )?;
+    /// Whether the claimer is able to claim the dividend at the given height.
+    fn can_claim(
+        who: &T::AccountId,
+        token: &Token,
+        dividend: T::Balance,
+        current_block: T::BlockNumber,
+    ) -> Result {
+        let (staking_requirement, interval) = Self::claim_restriction_of(token);
+        Self::contribute_enough_staking(who, dividend, staking_requirement)?;
+        Self::passed_enough_interval(who, token, interval, current_block)?;
+        Ok(())
+    }
+
+    fn deposit_claim_event(
+        source_weight_info: (u128, bool),
+        target_weight_info: (u128, bool),
+        source: &T::AccountId,
+        target: &Token,
+        dividend: T::Balance,
+    ) {
+        let (source_vote_weight, source_overflow) = source_weight_info;
+        let (target_vote_weight, target_overflow) = target_weight_info;
+        if !source_overflow && !target_overflow {
             Self::deposit_event(RawEvent::DepositorClaim(
-                who.clone(),
-                token.clone(),
+                source.clone(),
+                target.clone(),
+                source_vote_weight as u64,
+                target_vote_weight as u64,
+                dividend,
+            ));
+        } else {
+            Self::deposit_event(RawEvent::DepositorClaimV1(
+                source.clone(),
+                target.clone(),
                 source_vote_weight,
                 target_vote_weight,
                 dividend,
             ));
         }
+    }
 
-        <PseduIntentionProfiles<T>>::insert(token, p_vote_weight);
-        <DepositRecords<T>>::insert(&key, d_vote_weight);
+    fn try_get_deposit_record(
+        key: &(T::AccountId, Token),
+    ) -> result::Result<DepositVoteWeight<T::BlockNumber>, DepositVoteWeightV1<T::BlockNumber>>
+    {
+        if let Some(d1) = <DepositRecordsV1<T>>::get(key) {
+            Err(d1)
+        } else {
+            Ok(<DepositRecords<T>>::get(key))
+        }
+    }
 
-        Ok(())
+    fn try_get_psedu_intention_profs(
+        target: &Token,
+    ) -> result::Result<
+        PseduIntentionVoteWeight<T::BlockNumber>,
+        PseduIntentionVoteWeightV1<T::BlockNumber>,
+    > {
+        if let Some(p1) = <PseduIntentionProfilesV1<T>>::get(target) {
+            Err(p1)
+        } else {
+            Ok(<PseduIntentionProfiles<T>>::get(target))
+        }
     }
 
     /// Ensure the vote weight of some depositor or transfer receiver is initialized.
-    fn try_init_receiver_vote_weight(who: &T::AccountId, token: &Token) {
+    fn try_init_receiver_vote_weight(
+        who: &T::AccountId,
+        token: &Token,
+        current_block: T::BlockNumber,
+    ) {
         let key = (who.clone(), token.clone());
         if !<DepositRecords<T>>::exists(&key) {
-            <DepositRecords<T>>::insert(
-                &key,
-                DepositVoteWeight {
-                    last_deposit_weight: 0,
-                    last_deposit_weight_update: <system::Module<T>>::block_number(),
-                },
-            );
+            <DepositRecords<T>>::insert(&key, DepositVoteWeight::new(0u64, current_block));
         }
     }
 
-    /// Transform outside irreversible blocks to native blocks.
-    fn wait_blocks(token: &Token) -> result::Result<u64, &'static str> {
-        let seconds_per_block: T::Moment = timestamp::Module::<T>::minimum_period();
-        match token.as_slice() {
-            // btc
-            <xbitcoin::Module<T> as ChainT>::TOKEN => {
-                let irr_block: u32 = <xbitcoin::Module<T>>::confirmation_number();
-                let seconds = (irr_block * 10 * 60) as u64;
-                Ok(seconds / seconds_per_block.as_())
-            }
-            <xsdot::Module<T> as ChainT>::TOKEN => Ok(0u64),
-            _ => {
-                error!(
-                    "[wait_blocks] token {:?} is unsupported",
-                    u8array_to_string(token)
-                );
-                Err("This token is not supported.")
-            }
-        }
-    }
+    fn issue_reward(source: &T::AccountId, token: &Token, _value: T::Balance) -> Result {
+        ensure_with_errorlog!(
+            Self::psedu_intentions().contains(&token),
+            "Cannot issue deposit reward since this token is not a psedu intention.",
+            "token:{:}",
+            token!(token)
+        );
 
-    fn issue_reward(source: &T::AccountId, token: &Token, value: T::Balance) -> Result {
-        let psedu_intention = Self::psedu_intention_profiles(token);
-        if psedu_intention.last_total_deposit_weight == 0 {
-            info!(
-                target: "tokens",
-                "should issue reward to {:?}, but the last_total_deposit_weight of Token: {:?} is zero.",
-                source,
-                u8array_to_string(token)
-            );
-            return Ok(());
-        }
-        let blocks = Self::wait_blocks(token)?;
-
-        let addr = T::DetermineTokenJackpotAccountId::accountid_for(token);
-        let jackpot = xassets::Module::<T>::pcx_free_balance(&addr).as_();
-
-        let depositor_vote_weight = blocks as u128 * value.as_() as u128;
-
-        let reward = match depositor_vote_weight.checked_mul(jackpot as u128) {
-            Some(x) => {
-                let reward =
-                    x / (depositor_vote_weight + psedu_intention.last_total_deposit_weight as u128);
-                if reward > jackpot as u128 {
-                    panic!("The issue reward is no more than the jackpot balance");
-                }
-                if reward < u64::max_value() as u128 {
-                    T::Balance::sa(reward as u64)
-                } else {
-                    panic!("reward on issue definitely less than u64::max_value()")
-                }
-            }
-            None => panic!("blocks * jackpot * value overflow on issue"),
-        };
-
-        xassets::Module::<T>::pcx_move_free_balance(&addr, source, reward).map_err(|e| e.info())?;
+        // when deposit(issue) success, reward some pcx for account to claim
+        let reward_value = Self::deposit_reward();
+        xbridge_common::Module::<T>::reward_from_jackpot(token, source, reward_value);
 
         Self::deposit_event(RawEvent::DepositorReward(
             source.clone(),
             token.clone(),
-            value,
+            reward_value,
         ));
 
         Ok(())
     }
 
-    fn update_depositor_vote_weight_only(from: &T::AccountId, target: &Token) {
-        let key = (from.clone(), target.clone());
-        let mut d_vote_weight: DepositVoteWeight<T::BlockNumber> = Self::deposit_records(&key);
-
-        {
-            let mut record = DepositRecord::<T> {
-                depositor: from,
-                staking: &mut d_vote_weight,
-                token: target,
-            };
-
-            <xstaking::Module<T>>::generic_update_vote_weight(&mut record);
-        }
-
-        <DepositRecords<T>>::insert(&key, d_vote_weight);
-    }
-
-    fn update_bare_vote_weight(source: &T::AccountId, target: &Token) {
-        let key = (source.clone(), target.clone());
-        let mut p_vote_weight = <PseduIntentionProfiles<T>>::get(target);
-        let mut d_vote_weight: DepositVoteWeight<T::BlockNumber> = Self::deposit_records(&key);
-
-        {
-            let mut prof = PseduIntentionProfs::<T> {
-                token: target,
-                staking: &mut p_vote_weight,
-            };
-            let mut record = DepositRecord::<T> {
-                depositor: source,
-                token: target,
-                staking: &mut d_vote_weight,
-            };
-
-            <xstaking::Module<T>>::update_bare_vote_weight_both_way(&mut prof, &mut record);
-        }
-
-        <PseduIntentionProfiles<T>>::insert(target, p_vote_weight);
-        <DepositRecords<T>>::insert(&key, d_vote_weight);
+    fn update_bare_vote_weight(
+        source: &T::AccountId,
+        target: &Token,
+        current_block: T::BlockNumber,
+    ) {
+        Self::update_depositor_vote_weight(source, target, current_block);
+        Self::update_psedu_intention_vote_weight(target, current_block);
     }
 
     #[cfg(feature = "std")]
     pub fn bootstrap_update_vote_weight(source: &T::AccountId, target: &Token) {
-        Self::try_init_receiver_vote_weight(source, target);
-        Self::update_bare_vote_weight(source, target);
-    }
-}
-
-impl<T: Trait> OnAssetRegisterOrRevoke for Module<T> {
-    fn on_register(token: &Token, is_psedu_intention: bool) -> Result {
-        if !is_psedu_intention {
-            return Ok(());
-        }
-
-        ensure!(
-            !Self::psedu_intentions().contains(token),
-            "Cannot register psedu intention repeatedly."
-        );
-
-        <PseduIntentions<T>>::mutate(|i| i.push(token.clone()));
-
-        <PseduIntentionProfiles<T>>::insert(
-            token,
-            PseduIntentionVoteWeight {
-                last_total_deposit_weight: 0,
-                last_total_deposit_weight_update: <system::Module<T>>::block_number(),
-            },
-        );
-
-        Ok(())
-    }
-
-    fn on_revoke(token: &Token) -> Result {
-        <PseduIntentions<T>>::mutate(|v| {
-            v.retain(|t| t != token);
-        });
-        Ok(())
-    }
-}
-
-impl<T: Trait> OnRewardCalculation<T::AccountId, T::Balance> for Module<T> {
-    fn psedu_intentions_info() -> Vec<(RewardHolder<T::AccountId>, T::Balance)> {
-        Self::psedu_intentions()
-            .into_iter()
-            .filter(|token| Self::asset_power(token).is_some())
-            .map(|token| {
-                let stake = Self::trans_pcx_stake(&token);
-                (RewardHolder::PseduIntention(token), stake)
-            })
-            .filter(|(_, stake)| stake.is_some())
-            .map(|(holder, stake)| (holder, stake.unwrap()))
-            .collect()
-    }
-}
-
-impl<T: Trait> OnReward<T::AccountId, T::Balance> for Module<T> {
-    fn reward(token: &Token, value: T::Balance) {
-        let addr = T::DetermineTokenJackpotAccountId::accountid_for(token);
-        let _ = xassets::Module::<T>::pcx_issue(&addr, value);
+        let current_block = <system::Module<T>>::block_number();
+        Self::try_init_receiver_vote_weight(source, target, current_block);
+        Self::update_bare_vote_weight(source, target, current_block);
     }
 }
 
 impl<T: Trait> Module<T> {
-    pub fn token_jackpot_accountid_for(token: &Token) -> T::AccountId {
-        T::DetermineTokenJackpotAccountId::accountid_for(token)
-    }
+    pub fn referral_or_council_of(who: &T::AccountId, token: &Token) -> T::AccountId {
+        use xbridge_common::traits::CrossChainBindingV2;
 
-    pub fn multi_token_jackpot_accountid_for(tokens: &Vec<Token>) -> Vec<T::AccountId> {
-        tokens
-            .into_iter()
-            .map(|t| T::DetermineTokenJackpotAccountId::accountid_for(t))
-            .collect()
-    }
-
-    fn pcx_precision() -> u32 {
-        let pcx = <xassets::Module<T> as ChainT>::TOKEN.to_vec();
-        let pcx_asset = <xassets::Module<T>>::get_asset(&pcx).expect("PCX definitely exist.");
-
-        return pcx_asset.precision().as_();
-    }
-
-    pub fn asset_power(token: &Token) -> Option<T::Balance> {
-        let one_pcx = 10_u64.pow(Self::pcx_precision());
-
-        if token.eq(&<xassets::Module<T> as ChainT>::TOKEN.to_vec()) {
-            return Some(As::sa(one_pcx));
-        }
-
-        let discount = <TokenDiscount<T>>::get(token) as u64;
-
-        if token.eq(&<xsdot::Module<T> as ChainT>::TOKEN.to_vec()) {
-            return Some(As::sa(one_pcx * discount / 100));
+        // Get referral from xbridge_common since v1.0.3.
+        let referral = if <xsdot::Module<T> as ChainT>::TOKEN == token.as_slice()
+            || <xbitcoin::Module<T> as ChainT>::TOKEN == token.as_slice()
+        {
+            if let Some(asset_info) = <xassets::AssetInfo<T>>::get(token) {
+                let asset = asset_info.0;
+                let chain = asset.chain();
+                xbridge_features::Module::<T>::get_first_binding_channel(who, chain)
+            } else {
+                None
+            }
         } else {
-            if let Some(price) = <xspot::Module<T>>::aver_asset_price(token) {
-                let power = match (price.as_() as u128).checked_mul(discount as u128) {
-                    Some(x) => T::Balance::sa((x / 100) as u64),
-                    None => panic!("price * discount overflow"),
-                };
+            xbridge_common::Module::<T>::get_binding_info(token, who)
+        };
 
-                return Some(power);
-            }
-        }
-
-        None
+        referral.unwrap_or_else(xaccounts::Module::<T>::council_account)
     }
 
-    // Convert the total issuance of some token to equivalent PCX, including the PCX precision.
-    // aver_asset_price(token) * total_issuance(token) / 10^token.precision
-    pub fn trans_pcx_stake(token: &Token) -> Option<T::Balance> {
-        if let Some(power) = Self::asset_power(token) {
-            match <xassets::Module<T>>::get_asset(token) {
-                Ok(asset) => {
-                    let pow_precision = 10_u128.pow(asset.precision() as u32);
-                    let total_balance =
-                        <xassets::Module<T>>::all_type_total_asset_balance(&token).as_();
+    pub fn is_airdrop_asset(token: &Token) -> bool {
+        <AirdropDistributionRatioMap<T>>::exists(token)
+    }
 
-                    let total = match (total_balance as u128).checked_mul(power.as_() as u128) {
-                        Some(x) => T::Balance::sa((x / pow_precision) as u64),
-                        None => panic!("total_balance * price overflow"),
-                    };
+    pub fn is_cross_chain_asset(token: &Token) -> bool {
+        <FixedCrossChainAssetPowerMap<T>>::exists(token)
+    }
 
-                    return Some(total);
-                }
-                _ => {}
-            }
-        }
+    pub fn token_jackpot_accountid_for_unsafe(token: &Token) -> T::AccountId {
+        T::DetermineTokenJackpotAccountId::accountid_for_unsafe(token)
+    }
 
-        None
+    pub fn multi_token_jackpot_accountid_for_unsafe(tokens: &[Token]) -> Vec<T::AccountId> {
+        tokens
+            .iter()
+            .map(T::DetermineTokenJackpotAccountId::accountid_for_unsafe)
+            .collect()
     }
 }
