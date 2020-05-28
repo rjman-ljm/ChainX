@@ -198,6 +198,7 @@ decl_module! {
 
         /// if use `RelayTx` struct would export in metadata, cause complex in front-end
         pub fn push_transaction(origin, tx: Vec<u8>) -> Result {
+        /*
             let from = ensure_signed(origin)?;
             let relay_tx: RelayTx = Decode::decode(&mut tx.as_slice()).ok_or("Parse RelayTx err")?;
             debug!("[push_transaction]|from:{:?}|relay_tx:{:?}", from, relay_tx);
@@ -207,6 +208,7 @@ decl_module! {
             // 50 is trick number for call difficulty power, if change in `runtime/src/fee.rs`,
             // should modify this number.
             xbridge_common::Module::<T>::reward_relayer(&Self::TOKEN.to_vec(), &from, 50, tx.len() as u64);
+         */
             Ok(())
         }
 
