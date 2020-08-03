@@ -67,7 +67,7 @@ impl ChainSpec {
     pub(crate) fn from(s: &str) -> Option<Self> {
         match s {
             "mainnet" | "" => Some(ChainSpec::Mainnet),
-            // "testnet-mohism" => Some(ChainSpec::TestnetMohism),
+            "testnet-mohism" => Some(ChainSpec::TestnetMohism),
             "testnet-confucianism" => Some(ChainSpec::TestnetConfucianism),
             "dev" => Some(ChainSpec::Development),
             _ => None,
