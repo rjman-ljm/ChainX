@@ -10,8 +10,8 @@ description = "Fully Decentralized Interchain Crypto Asset Management on Polkado
 # Remove this once Substrate releases a new tag with this patch.
 jsonrpc-derive = { git = "https://github.com/paritytech/jsonrpc", rev = "57575efe9c220c7e7c0addf3c90e9577e3296c80" }
 # patch for substrate runtime module
-frame-executive = { path = "./frame/executive" }
-pallet-transaction-payment = { path = "./frame/transaction-payment" }
+# frame-executive = { path = "./frame/executive" }
+# pallet-transaction-payment = { path = "./frame/transaction-payment" }
 
 [dependencies]
 cli = { package = "chainx-cli", path = "cli" }
