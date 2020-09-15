@@ -56,6 +56,9 @@ jobs:
     - name: Format
       run: cargo fmt -- --check
 
+    - name: Test deterministic wasm
+      run: bash scripts/ci/test_deterministic_wasm.sh
+
     - if: matrix.os == 'ubuntu-latest'
       run: cargo clippy
 
