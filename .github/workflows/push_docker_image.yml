@@ -21,7 +21,7 @@ jobs:
         name: Build & push docker image.
         with:
           image: chainxorg/chainx
-          tag: ${{ steps.get_version.outputs.VERSION }}
+          tag: relase
           registry: docker.io
           dockerfile: Dockerfile
           username: ${{ secrets.DOCKER_USERNAME }}
