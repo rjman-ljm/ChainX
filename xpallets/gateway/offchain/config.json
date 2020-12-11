@@ -1,0 +1,11 @@
+{
+  "btc-url": "http://auth:bitcoin-b2dd077@47.111.89.46:18332",
+  "btc-block-interval": 120,
+  "chainx-url": "ws://127.0.0.1:8087",
+  "chainx-relay-seed": "Bob",
+  "only-header": true,
+  "log-path": "log/btc_relay.log",
+  "log-level": "DEBUG",
+  "log-roll-size": 100,
+  "log-roll-count": 5
+}
