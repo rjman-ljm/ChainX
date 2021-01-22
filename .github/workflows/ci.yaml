@@ -18,6 +18,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
+        toolchain:
+          - stable
+          - nightly
+          - nightly-2020-09-30
 
     steps:
     - name: Checkout repository
@@ -26,7 +30,7 @@ jobs:
     - name: Install Rust toolchain
       uses: actions-rs/toolchain@v1
       with:
-        toolchain: nightly-2020-09-30
+        toolchain: ${{ matrix.toolchain }}
         target: wasm32-unknown-unknown
         profile: minimal
         override: true
