@@ -36,6 +36,15 @@ jobs:
         override: true
         components: rustfmt, rust-src, clippy
 
+    - name: Install Rust nighlty wasm target
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        target: wasm32-unknown-unknown
+        profile: minimal
+        override: true
+        components: rustfmt, rust-src, clippy
+
     - if: matrix.os == 'ubuntu-latest'
       run: sudo chown -R $(whoami):$(id -ng) ~/.cargo/
 
