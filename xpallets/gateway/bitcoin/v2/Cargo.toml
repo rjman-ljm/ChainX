@@ -35,6 +35,7 @@ xp-rpc = { path = "../../../../primitives/rpc", optional = true }
 
 # light-bitcoin
 light-bitcoin = { git = "https://github.com/chainx-org/light-bitcoin", branch = "master", default-features = false }
+bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 pallet-balances = "2.0.1"
@@ -42,6 +43,7 @@ pallet-balances = "2.0.1"
 [features]
 default = ["std"]
 std = [
+  "bs58/std",
   "codec/std",
   "serde",
   "sha2/std",
