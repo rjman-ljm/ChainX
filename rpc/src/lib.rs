@@ -102,6 +102,7 @@ where
     C::Api:
         xpallet_dex_spot_rpc_runtime_api::XSpotApi<Block, AccountId, Balance, BlockNumber, Balance>,
     C::Api: xpallet_gateway_common_rpc_runtime_api::XGatewayCommonApi<Block, AccountId, Balance>,
+    C::Api: xpallet_gateway_bitcoin_v2_rpc_runtime_api::XGatewayBitcoinV2Api<Block, AccountId, BlockNumber, Balance>,
     C::Api: xpallet_gateway_records_rpc_runtime_api::XGatewayRecordsApi<
         Block,
         AccountId,
@@ -134,6 +135,7 @@ where
     use xpallet_assets_rpc::{Assets, XAssetsApi};
     use xpallet_dex_spot_rpc::{XSpot, XSpotApi};
     use xpallet_gateway_common_rpc::{XGatewayCommon, XGatewayCommonApi};
+    use xpallet_gateway_bitcoin_v2_rpc::{XGatewayBitcoinV2Api, GatewayBitcoinV2};
     use xpallet_gateway_records_rpc::{XGatewayRecords, XGatewayRecordsApi};
     use xpallet_mining_asset_rpc::{XMiningAsset, XMiningAssetApi};
     use xpallet_mining_staking_rpc::{XStaking, XStakingApi};
@@ -212,6 +214,9 @@ where
         client.clone(),
     )));
     io.extend_with(XGatewayCommonApi::to_delegate(XGatewayCommon::new(
+        client.clone(),
+    )));
+    io.extend_with(XGatewayBitcoinV2Api::to_delegate(GatewayBitcoinV2::new(
         client.clone(),
     )));
     io

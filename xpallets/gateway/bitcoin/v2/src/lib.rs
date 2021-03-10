@@ -27,6 +27,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod rpc;
 pub mod types;
 
 #[cfg(test)]
@@ -1119,10 +1120,9 @@ pub mod pallet {
             Self::convert_to_btc(secure_collateral.saturated_into())
         }
 
-        //rpc use
         pub fn get_first_matched_vault(
             xbtc_amount: BalanceOf<T>,
-        ) -> Option<(T::AccountId, Vec<u8>)> {
+        ) -> Option<crate::rpc::RpcVaultInfo<T::AccountId>> {
             Vaults::<T>::iter()
                 .take_while(|(vault_id, vault)| {
                     if let Ok(token_upper_bound) =
@@ -1135,7 +1135,10 @@ pub mod pallet {
                     }
                 })
                 .take(1)
-                .map(|(vault_id, vault)| (vault_id, vault.wallet.layout().to_vec()))
+                .map(|(vault_id, vault)| crate::rpc::RpcVaultInfo {
+                    account: vault_id,
+                    btc_addr: vault.wallet.layout().to_vec(),
+                })
                 .next()
         }
     }

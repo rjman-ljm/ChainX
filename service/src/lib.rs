@@ -418,13 +418,7 @@ impl IdentifyVariant for Box<dyn sc_service::ChainSpec> {
 }
 
 pub fn build_full(config: Configuration) -> Result<TaskManager, ServiceError> {
-    if config.chain_spec.is_chainx() {
-        new_full::<chainx_runtime::RuntimeApi, chainx_executor::ChainXExecutor>(config)
-    } else if config.chain_spec.is_malan() {
-        new_full::<malan_runtime::RuntimeApi, chainx_executor::MalanExecutor>(config)
-    } else {
         new_full::<dev_runtime::RuntimeApi, chainx_executor::DevExecutor>(config)
-    }
 }
 
 /// Builds a new service for a light client.
@@ -525,11 +519,5 @@ where
 }
 
 pub fn build_light(config: Configuration) -> Result<TaskManager, ServiceError> {
-    if config.chain_spec.is_chainx() {
-        new_light::<chainx_runtime::RuntimeApi, chainx_executor::ChainXExecutor>(config)
-    } else if config.chain_spec.is_malan() {
-        new_light::<malan_runtime::RuntimeApi, chainx_executor::MalanExecutor>(config)
-    } else {
         new_light::<dev_runtime::RuntimeApi, chainx_executor::DevExecutor>(config)
-    }
 }

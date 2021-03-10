@@ -1276,7 +1276,7 @@ impl_runtime_apis! {
     }
 
     impl xpallet_gateway_bitcoin_v2_rpc_runtime_api::XGatewayBitcoinV2Api<Block, AccountId, BlockNumber, Balance> for Runtime {
-        fn get_first_matched_vault(xbtc_amount: Balance) -> Option<(AccountId, Vec<u8>)> {
+        fn get_first_matched_vault(xbtc_amount: Balance) -> Option<xpallet_gateway_bitcoin_v2_rpc_runtime_api::RpcVaultInfo<AccountId>> {
             XGatewayBitcoinV2::get_first_matched_vault(xbtc_amount)
         }
     }

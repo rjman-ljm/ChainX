@@ -30,6 +30,7 @@ xpallet-assets = { path = "../../../assets", default-features = false }
 xpallet-assets-registrar = { path = "../../../assets-registrar", default-features = false }
 chainx-primitives = { path = "../../../../primitives", default-features = false }
 xp-protocol = { path = "../../../../primitives/protocol", default-features = false }
+xp-rpc = { path = "../../../../primitives/rpc", optional = true }
 
 
 # light-bitcoin
@@ -60,4 +61,5 @@ std = [
   # Chainx primitives
   "chainx-primitives/std",
   "xp-protocol/std",
+  "xp-rpc",
 ]
