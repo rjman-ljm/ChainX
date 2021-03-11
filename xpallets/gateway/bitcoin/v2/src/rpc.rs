@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use sp_std::cmp::{Eq, PartialEq};
 use sp_std::default::Default;
 use sp_std::vec::Vec;
@@ -15,3 +16,6 @@ pub struct RpcVaultInfo<AccountId> {
     #[cfg_attr(feature = "std", serde(with = "xp_rpc::serde_text"))]
     pub btc_addr: Vec<u8>,
 }
+=======
+// rpc module
+>>>>>>> btc-addr

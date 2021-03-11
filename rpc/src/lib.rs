@@ -219,6 +219,7 @@ where
     io.extend_with(XGatewayBitcoinV2Api::to_delegate(GatewayBitcoinV2::new(
         client.clone(),
     )));
+    // TODO: integrate bitcoin v2 api
     io
 }
 

@@ -55,6 +55,7 @@ pub mod pallet {
         ensure_root, ensure_signed,
         pallet_prelude::{BlockNumberFor, OriginFor},
     };
+    use light_bitcoin::keys::Address;
 
     use light_bitcoin::keys::DisplayLayout;
 
@@ -187,7 +188,7 @@ pub mod pallet {
         pub(crate) fn register_vault(
             origin: OriginFor<T>,
             collateral: BalanceOf<T>,
-            btc_address: Vec<u8>,
+            btc_addr: Vec<u8>,
         ) -> DispatchResultWithPostInfo {
             let sender = ensure_signed(origin)?;
             ensure!(
@@ -198,14 +199,15 @@ pub mod pallet {
                 !<Vaults<T>>::contains_key(&sender),
                 Error::<T>::VaultAlreadyRegistered
             );
-            let btc_address = Self::verify_btc_address(&btc_address)?;
+            Self::verify_btc_address(&btc_addr)?;
+
             ensure!(
-                !<BtcAddresses<T>>::contains_key(&btc_address),
+                !<BtcAddresses<T>>::contains_key(&btc_addr),
                 Error::<T>::BtcAddressOccupied
             );
             Self::lock_collateral(&sender, collateral)?;
-            <BtcAddresses<T>>::insert(&btc_address, sender.clone());
-            <Vaults<T>>::insert(&sender, Vault::new(sender.clone(), btc_address));
+            <BtcAddresses<T>>::insert(&btc_addr, sender.clone());
+            <Vaults<T>>::insert(&sender, Vault::new(sender.clone(), btc_addr));
             Self::deposit_event(Event::VaultRegistered(sender, collateral));
             Ok(().into())
         }
@@ -374,7 +376,7 @@ pub mod pallet {
                 Error::<T>::AmountBelowDustAmount
             );
 
-            let btc_address = Self::verify_btc_address(&btc_addr)?;
+            Self::verify_btc_address(&btc_addr)?;
 
             // Increase vault's to_be_redeemed_tokens
             Vaults::<T>::mutate(&vault.id, |vault| {
@@ -394,7 +396,7 @@ pub mod pallet {
                     vault: vault_id,
                     open_time: <frame_system::Pallet<T>>::block_number(),
                     requester: sender,
-                    btc_address,
+                    btc_address: btc_addr,
                     btc_amount: redeem_amount,
                     redeem_fee: RedeemFee::<T>::get(),
                     reimburse: false,
@@ -801,7 +803,7 @@ pub mod pallet {
             Ok(result.saturated_into())
         }
 
-        fn verify_btc_address(address: &[u8]) -> Result<BtcAddress, Error<T>> {
+        fn verify_btc_address(address: &[u8]) -> Result<Address, Error<T>> {
             from_utf8(address)
                 .map_err(|_| Error::<T>::InvalidAddress)?
                 .parse()

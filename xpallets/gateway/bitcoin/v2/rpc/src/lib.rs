@@ -17,9 +17,13 @@ use sp_runtime::{
 
 use xp_rpc::{runtime_error_into_rpc_err, Result};
 
+<<<<<<< HEAD
 use xpallet_gateway_bitcoin_v2_rpc_runtime_api::{
     RpcVaultInfo, XGatewayBitcoinV2Api as XGatewayBitcoinV2RuntimeApi,
 };
+=======
+use xpallet_gateway_bitcoin_v2_rpc_runtime_api::XGatewayBitcoinV2Api as XGatewayBitcoinV2RuntimeApi;
+>>>>>>> btc-addr
 
 pub struct GatewayBitcoinV2<C, B> {
     client: Arc<C>,
@@ -45,7 +49,11 @@ where
         &self,
         xbtc_amount: Balance,
         at: Option<BlockHash>,
+<<<<<<< HEAD
     ) -> Result<Option<RpcVaultInfo<AccountId>>>;
+=======
+    ) -> Result<Option<(AccountId, Vec<u8>)>>;
+>>>>>>> btc-addr
 }
 
 impl<C, Block, AccountId, Balance>
@@ -71,7 +79,11 @@ where
         &self,
         xbtc_amount: Balance,
         at: Option<<Block as BlockT>::Hash>,
+<<<<<<< HEAD
     ) -> Result<Option<RpcVaultInfo<AccountId>>> {
+=======
+    ) -> Result<Option<(AccountId, Vec<u8>)>> {
+>>>>>>> btc-addr
         let api = self.client.runtime_api();
         let at = BlockId::hash(at.unwrap_or_else(|| self.client.info().best_hash));
         api.get_first_matched_vault(&at, xbtc_amount)
