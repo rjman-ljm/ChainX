@@ -1139,7 +1139,7 @@ pub mod pallet {
                 .take(1)
                 .map(|(vault_id, vault)| crate::rpc::RpcVaultInfo {
                     account: vault_id,
-                    btc_addr: bs58::encode(vault.wallet.layout().to_vec()).into_vec(),
+                    btc_addr: vault.wallet,
                 })
                 .next()
         }
