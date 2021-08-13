@@ -29,7 +29,13 @@ jobs:
     - name: Build
       shell: bash
       run: |
+        ls ../ -alh
+        echo "============="
+        ls -alh && pwd
+        echo "============="
         cd /build
+        ls -alh && pwd
+        echo "============="
         mv /build/rust-toolchain /build/rust-toolchain.bak
         scripts/ci/dump_spec_version.py
         build --json | tee srtool_output.json
@@ -48,90 +54,90 @@ jobs:
         name: chainx_runtime.compact.wasm
         path: runtime/chainx/target/srtool/release/wbuild/chainx-runtime/chainx_runtime.compact.wasm
 
-  release:
-    name: Create Pre-release
-    needs: ['prepare-wasm']
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@master
+  # release:
+  #   name: Create Pre-release
+  #   needs: ['prepare-wasm']
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@master
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v2
+  #     - name: Download artifacts
+  #       uses: actions/download-artifact@v2
 
-      - name: Echo info
-        shell: bash
-        run: |
-          pwd
-          ls -R
-      - name: Create Pre-release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          body_path: release_note.md/release_note.md
-          draft: false
-          prerelease: true
+  #     - name: Echo info
+  #       shell: bash
+  #       run: |
+  #         pwd
+  #         ls -R
+  #     - name: Create Pre-release
+  #       id: create_release
+  #       uses: actions/create-release@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         tag_name: ${{ github.ref }}
+  #         release_name: Release ${{ github.ref }}
+  #         body_path: release_note.md/release_note.md
+  #         draft: false
+  #         prerelease: true
 
-  publish:
-    name: Publish for ${{ matrix.os }}
-    needs: ["release"]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-18.04, ubuntu-20.04, ubuntu-latest]
+  # publish:
+  #   name: Publish for ${{ matrix.os }}
+  #   needs: ["release"]
+  #   runs-on: ${{ matrix.os }}
+  #   strategy:
+  #     matrix:
+  #       os: [ubuntu-18.04, ubuntu-20.04, ubuntu-latest]
 
-    steps:
-    - uses: hecrj/setup-rust-action@master
-      with:
-        rust-version: stable
+  #   steps:
+  #   - uses: hecrj/setup-rust-action@master
+  #     with:
+  #       rust-version: stable
 
-    - uses: actions/checkout@v1
+  #   - uses: actions/checkout@v1
 
-    - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: nightly-2021-03-01
-        target: wasm32-unknown-unknown
-        profile: minimal
-        override: true
-        components: rustfmt, rust-src, clippy
+  #   - name: Install Rust toolchain
+  #     uses: actions-rs/toolchain@v1
+  #     with:
+  #       toolchain: nightly-2021-03-01
+  #       target: wasm32-unknown-unknown
+  #       profile: minimal
+  #       override: true
+  #       components: rustfmt, rust-src, clippy
 
-    - name: Build
-      run: cargo build --release
+  #   - name: Build
+  #     run: cargo build --release
 
-    - name: Get the version
-      id: get_version
-      run: echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/}
+  #   - name: Get the version
+  #     id: get_version
+  #     run: echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/}
 
-    - name: Upload binaries to release
-      uses: svenstaro/upload-release-action@v1-release
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: target/release/chainx
-        asset_name: chainx-${{ steps.get_version.outputs.VERSION }}-${{ matrix.os }}-x86_64-unknown-linux-gnu
-        tag: ${{ github.ref }}
+  #   - name: Upload binaries to release
+  #     uses: svenstaro/upload-release-action@v1-release
+  #     with:
+  #       repo_token: ${{ secrets.GITHUB_TOKEN }}
+  #       file: target/release/chainx
+  #       asset_name: chainx-${{ steps.get_version.outputs.VERSION }}-${{ matrix.os }}-x86_64-unknown-linux-gnu
+  #       tag: ${{ github.ref }}
 
-  publish-wasm:
-    name: Publish wasm
-    needs: ['release']
-    runs-on: ubuntu-latest
+  # publish-wasm:
+  #   name: Publish wasm
+  #   needs: ['release']
+  #   runs-on: ubuntu-latest
 
-    steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v2
+  #   steps:
+  #   - name: Download artifacts
+  #     uses: actions/download-artifact@v2
 
-    - name: Get the version
-      id: get_version
-      run: echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/}
+  #   - name: Get the version
+  #     id: get_version
+  #     run: echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/}
 
-    - name: Upload binaries to release
-      uses: svenstaro/upload-release-action@v1-release
-      with:
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: chainx_runtime.compact.wasm/chainx_runtime.compact.wasm
-        asset_name: chainx_runtime-${{ steps.get_version.outputs.VERSION }}.compact.wasm
-        tag: ${{ github.ref }}
+  #   - name: Upload binaries to release
+  #     uses: svenstaro/upload-release-action@v1-release
+  #     with:
+  #       repo_token: ${{ secrets.GITHUB_TOKEN }}
+  #       file: chainx_runtime.compact.wasm/chainx_runtime.compact.wasm
+  #       asset_name: chainx_runtime-${{ steps.get_version.outputs.VERSION }}.compact.wasm
+  #       tag: ${{ github.ref }}
